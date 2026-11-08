@@ -4,21 +4,36 @@
             --python rig_gallina.py -- "<salida sin extension>"
 
 Genera <salida>.blend y <salida>.fbx (listo para Unity, solo esqueleto + malla, sin animaciones).
+
+Modelo final (2026-11-08, pico en dos piezas): se le pasa el FBX y la textura en vez de un .blend:
+    blender --background --factory-startup --python rig_gallina.py -- "<salida>" "Gallina_Final.fbx" "TEXTURAS FINALES/Gallina_Blanca.png"
 Si cambia la malla, ajustar PIEZAS y las coordenadas de huesos: estan medidas en el modelo original.
 """
 import bpy, bmesh, sys, os
 import numpy as np
 from mathutils import Matrix, Vector
 
-out_base = sys.argv[sys.argv.index("--") + 1]
+args = sys.argv[sys.argv.index("--") + 1:]
+out_base = args[0]
+if len(args) > 1:   # malla desde FBX (sin esqueleto) + textura
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    bpy.ops.import_scene.fbx(filepath=os.path.abspath(args[1]))
+    if len(args) > 2:
+        img_tex = bpy.data.images.load(os.path.abspath(args[2]))
+        for m in bpy.data.materials:
+            for nd in (m.node_tree.nodes if m.node_tree else []):
+                if nd.type == "TEX_IMAGE":
+                    nd.image = img_tex
 
 # Referencias medidas en el modelo original (mira a -X; su izquierda es -Y).
-CENTRO_Y = 0.0024   # plano de simetria
+CENTRO_Y = 0.0024   # plano de simetria (el modelo final esta centrado: se recalcula abajo)
 CENTRO_PIES_X = 0.034
 
 # Centro esperado de cada una de las 16 piezas sueltas de la malla.
 PIEZAS = {
-    "cuerpo": (-0.050, 0.000, 0.620), "pico": (-0.324, 0.000, 0.789), "cresta": (-0.097, 0.000, 0.941),
+    "cuerpo": (-0.050, 0.000, 0.620), "pico": (-0.324, 0.000, 0.789),
+    "cresta": (-0.097, 0.000, 0.941),
+    "pico_bajo": (-0.330, 0.000, 0.763),   # solo en el modelo final: mandibula separada
     "ojo.L": (-0.216, -0.121, 0.809), "ojo.R": (-0.216, 0.126, 0.809),
     "barbilla.L": (-0.305, -0.034, 0.686), "barbilla.R": (-0.305, 0.037, 0.686),
     "ala.L": (0.051, -0.298, 0.406), "ala.R": (0.050, 0.303, 0.406),
@@ -42,6 +57,8 @@ def P(x, lado, z):
 # ---------------------------------------------------------------- malla
 obj = next(o for o in bpy.data.objects if o.type == "MESH")
 me = obj.data
+_ys = [(obj.matrix_world @ v.co).y for v in me.vertices]
+CENTRO_Y = (min(_ys) + max(_ys)) / 2
 to_rig = Matrix.Rotation(np.pi / 2, 4, "Z")
 to_rig = Matrix.Translation((CENTRO_Y, -CENTRO_PIES_X, 0)) @ to_rig
 original = np.array([list(obj.matrix_world @ v.co) for v in me.vertices])
@@ -70,7 +87,7 @@ for i in range(n):
             if lab[k] < 0:
                 lab[k] = n_isl; pila.append(k)
     n_isl += 1
-assert n_isl == len(PIEZAS), f"esperaba {len(PIEZAS)} piezas, hay {n_isl}"
+assert n_isl in (len(PIEZAS) - 1, len(PIEZAS)), f"esperaba {len(PIEZAS) - 1}-{len(PIEZAS)} piezas, hay {n_isl}"
 mask = {}
 for isl in range(n_isl):
     c = original[lab == isl].mean(0)
@@ -212,40 +229,44 @@ pc = smooth(0.87, 0.93, vco[idx, 2])
 W["comb"][idx] += pc
 W["head"][idx] += 1 - pc
 
-# Pico: lo que queda bajo la linea de la boca va a la mandibula.
-idx = mask["pico"]
-ori = original[idx]
-linea = 0.783 - 0.16 * (ori[:, 0] + 0.3915)
-abajo = ori[:, 2] < linea
-W["jaw"][idx[abajo]] += 1
-W["head"][idx[~abajo]] += 1
-print("PICO superior", int((~abajo).sum()), "inferior", int(abajo.sum()))
+if "pico_bajo" in mask:   # modelo final: el pico ya viene en dos piezas, no hay caras que crucen la boca
+    poner("pico", "head")
+    poner("pico_bajo", "jaw")
+    print("PICO superior", len(mask["pico"]), "inferior", len(mask["pico_bajo"]))
+else:
+    idx = mask["pico"]
+    ori = original[idx]
+    linea = 0.783 - 0.16 * (ori[:, 0] + 0.3915)
+    abajo = ori[:, 2] < linea
+    W["jaw"][idx[abajo]] += 1
+    W["head"][idx[~abajo]] += 1
+    print("PICO superior", int((~abajo).sum()), "inferior", int(abajo.sum()))
 
-# El pico es una sola pieza con un pliegue: al abrirlo, las caras que cruzan la boca se estiran.
-# Se les apunta la UV a un texel oscuro del ojo para que se vean como el interior de la boca.
-img = next((i for i in bpy.data.images if i.size[0] > 256), None)
-uv = me.uv_layers.active.data
-pix = np.empty(img.size[0] * img.size[1] * 4, dtype=np.float32)
-img.pixels.foreach_get(pix)
-pix = pix.reshape(img.size[1], img.size[0], 4)
-es_ojo = set(mask["ojo.L"].tolist())
-mejor_uv, mejor_luz = None, 9.0
-for poly in me.polygons:
-    if poly.vertices[0] in es_ojo:
-        for li in poly.loop_indices:
-            u, v = uv[li].uv
-            px = pix[int(v * (img.size[1] - 1)) % img.size[1], int(u * (img.size[0] - 1)) % img.size[0]]
-            if px[:3].sum() < mejor_luz:
-                mejor_luz, mejor_uv = float(px[:3].sum()), (float(u), float(v))
-en_pico = {int(v): bool(b) for v, b in zip(idx, abajo)}
-cruzan = 0
-for poly in me.polygons:
-    lados = {en_pico[v] for v in poly.vertices if v in en_pico}
-    if len(lados) == 2:
-        cruzan += 1
-        for li in poly.loop_indices:
-            uv[li].uv = mejor_uv
-print("PICO caras que cruzan la boca", cruzan, "texel oscuro", mejor_uv, "luz %.3f" % mejor_luz)
+    # El pico es una sola pieza con un pliegue: al abrirlo, las caras que cruzan la boca se estiran.
+    # Se les apunta la UV a un texel oscuro del ojo para que se vean como el interior de la boca.
+    img = next((i for i in bpy.data.images if i.size[0] > 256), None)
+    uv = me.uv_layers.active.data
+    pix = np.empty(img.size[0] * img.size[1] * 4, dtype=np.float32)
+    img.pixels.foreach_get(pix)
+    pix = pix.reshape(img.size[1], img.size[0], 4)
+    es_ojo = set(mask["ojo.L"].tolist())
+    mejor_uv, mejor_luz = None, 9.0
+    for poly in me.polygons:
+        if poly.vertices[0] in es_ojo:
+            for li in poly.loop_indices:
+                u, v = uv[li].uv
+                px = pix[int(v * (img.size[1] - 1)) % img.size[1], int(u * (img.size[0] - 1)) % img.size[0]]
+                if px[:3].sum() < mejor_luz:
+                    mejor_luz, mejor_uv = float(px[:3].sum()), (float(u), float(v))
+    en_pico = {int(v): bool(b) for v, b in zip(idx, abajo)}
+    cruzan = 0
+    for poly in me.polygons:
+        lados = {en_pico[v] for v in poly.vertices if v in en_pico}
+        if len(lados) == 2:
+            cruzan += 1
+            for li in poly.loop_indices:
+                uv[li].uv = mejor_uv
+    print("PICO caras que cruzan la boca", cruzan, "texel oscuro", mejor_uv, "luz %.3f" % mejor_luz)
 
 
 # Diagnostico: caras abiertas por pieza (importa porque Unity no dibuja el reverso).
