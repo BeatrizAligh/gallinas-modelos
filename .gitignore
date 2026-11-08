@@ -1,0 +1,16 @@
+# Copias de seguridad de Blender
+*.blend1
+*.blend2
+*.blend@
+# Python
+__pycache__/
+*.pyc
+# Sistema
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Modelos de alta poligonalidad (se quedan solo en local)
+/Props/Alta/
+/Personajes/*/*[Aa]lta*.fbx
+/Personajes/*/*[Aa]lto*.fbx
