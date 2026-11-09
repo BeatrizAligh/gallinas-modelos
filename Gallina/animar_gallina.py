@@ -546,6 +546,162 @@ def Victory(t, T):
     return d
 
 
+# ---------------------------------------------------------------- presentacion del juego
+@clip(4.2)
+def Intro(t, T):
+    """Cae del cielo, aterriza aplastada, mira a los lados, coge aire y suelta un cacareo enorme (entra el logo) y
+    termina con dos saltitos de orgullo. El juego la mueve y pone el logo encima del cacareo (t = 2.05 s)."""
+    d = {}
+    # 1) Caida (0 - 0.42): aleteo loco, patas colgando, ojos como platos.
+    if t < 0.42:
+        x = t / 0.42
+        d["root_l"] = (0, 0, 1.25 * (1 - x * x))
+        b = sin(TAU * 7 * t)
+        alas(d, 76, 20 + 46 * b, -6, 24 * b)
+        d["scale"] = 1.08 + 0.04 * b
+        d["hips"] = (-12, 0, 0)
+        d["head"] = (12, 0, 0)
+        d["jaw"] = 22
+        d["tail"] = (16, 0, 0)
+        d["fan"] = 1.0
+        d["eye"] = 1.38
+        for lado, f, k in (("L", 0.0, 1), ("R", 0.5, -1)):
+            d["ankle." + lado] = (0.016 * k, 0.03 * sin(TAU * 3 * t + f * TAU), -0.016)
+            d["foot." + lado] = 40
+            d["toes." + lado] = 24 + 12 * sin(TAU * 4 * t + f * TAU)
+        return d
+
+    # 2) Aterrizaje (0.42 - 0.95): aplastada con rebote, alas que se recogen de un sacudon.
+    u = t - 0.42
+    amort = math.exp(-6.5 * u) * cos(TAU * 3.4 * u)
+    caida = 1.0 if t < 0.95 else 0.0
+    d["scale"] = 1 - 0.32 * amort * caida
+    d["hips_l"] = (0, 0, -0.08 * max(0.0, amort) * caida)
+    d["hips"] = (9 * amort * caida, 0, 0)
+    d["neck_01"] = (11 * amort * caida, 0, 0)
+    d["head"] = (-20 * amort * caida, 0, 0)
+    g = K(t, (0.42, 1), (0.72, 0))
+    alas(d, 74 * g, 52 * g, 0, -14 * g)
+    d["tail"] = (-12 * amort * caida + 10 * g, 0, 0)
+    d["fan"] = 0.9 * g
+    d["eye"] = K(t, (0.42, 0.25), (0.62, 1.0))
+
+    # 3) Mira a un lado y a otro (0.95 - 1.6), cabezazos secos.
+    y = K(t, (0.95, 0), (1.03, 58, "o"), (1.24, 58), (1.32, -58, "o"), (1.52, -58), (1.6, 0, "o"))
+    d["neck_02"] = (0, 0, y * 0.32)
+    d["head"] = suma(d["head"], (0, y * 0.2, y * 0.68))
+    if 0.95 <= t < 1.6:
+        d["eye"] = min(1.15, 1.15 * parpadeo(t, 1.25, 0.1))
+
+    # 4) Coge aire (1.6 - 2.02): se agacha hacia atras, se infla, alas recogidas temblando.
+    aire = K(t, (1.6, 0), (2.0, 1), (2.06, 0))
+    # 5) Cacareo enorme (2.02 - 2.85): se estira hacia la camara, pico muy abierto, alas y cola en abanico.
+    grito = K(t, (2.0, 0), (2.08, 1, "o"), (2.62, 0.92), (2.85, 0))
+    tiembla = sin(TAU * 11 * t)
+    d["scale"] = d["scale"] * (1 + 0.1 * aire + 0.12 * grito * (1 + 0.15 * tiembla)) - 0.06 * aire
+    d["hips"] = suma(d["hips"], (-7 * aire + 10 * grito, 0, 0))
+    d["spine"] = (-6 * aire + 8 * grito, 0, 0)
+    d["neck_01"] = suma(d["neck_01"], (-16 * aire + 18 * grito, 0, 0))
+    d["neck_02"] = suma(d["neck_02"], (-12 * aire + 14 * grito, 0, 4 * grito * tiembla))
+    d["head"] = suma(d["head"], (10 * aire - 34 * grito, 4 * grito * tiembla, 6 * grito * tiembla))
+    d["jaw"] = 42 * grito + 6 * aire
+    d["root_l"] = (0, 0, 0.06 * pulso(t, 2.0, 0.3))
+    if aire > 0.01 or grito > 0.01:
+        bate = sin(TAU * 6 * t)
+        alas(d, 14 * aire + 80 * grito, 6 * aire + grito * (30 + 40 * bate), -8 * grito, 22 * bate * grito)
+        d["tail"] = (-6 * aire + 22 * grito, 0, 10 * grito * tiembla)
+        d["fan"] = 0.3 * aire + 1.0 * grito
+        d["eye"] = 1 - 0.5 * aire + 0.35 * grito
+
+    # 6) Orgullo (2.85 - 4.2): dos saltitos de alegria, ojos felices, y se queda en pose.
+    if t >= 2.85:
+        p = min(1.0, (t - 2.9) / 0.7) if t > 2.9 else 0.0
+        q = (p * 2) % 1.0 if p < 1.0 else 0.0
+        sube = 4 * q * (1 - q) if 0 < p < 1 else 0.0
+        fin = K(t, (3.6, 0), (3.9, 1, "o"))
+        d["root_l"] = (0, 0, 0.14 * sube)
+        d["scale"] = 1 + 0.13 * (sube - 0.5) * (1 if sube > 0.5 else 1.6) * (1 - fin) + 0.03 * fin
+        giro = sin(TAU * (t - 2.9) / 0.7)
+        d["hips"] = (-8 * sube - 6 * fin, 6 * giro * (1 - fin), 12 * giro * (1 - fin))
+        d["spine"] = (-3 * fin, 0, 0)
+        d["neck_01"] = (-5 - 4 * fin, 0, 0)
+        d["neck_02"] = (0, 0, 0)
+        d["head"] = (-10 * sube + 4 - 6 * fin, 10 * giro * (1 - fin) + 8 * fin, 8 * giro * (1 - fin) + 10 * fin)
+        d["jaw"] = 10 + 20 * sube
+        a = sin(TAU * 6 * t)
+        abre = 64 * (1 - fin) + 18 * fin
+        alas(d, abre, (34 + 24 * a) * (1 - fin) + 10 * fin, -8 * (1 - fin), 16 * a * (1 - fin))
+        d["tail"] = (12 * sube + 10 * fin, 0, -12 * giro * (1 - fin))
+        d["fan"] = 0.5 + 0.4 * sube * (1 - fin) + 0.2 * fin
+        d["eye"] = 0.62 * parpadeo(t, 4.0, 0.12) if t > 3.9 else 0.62
+        for lado, k in (("L", 1), ("R", -1)):
+            d["ankle." + lado] = (0.008 * k * sube, 0, 0.04 * sube)
+            d["foot." + lado] = 26 * sube
+            d["toes." + lado] = 24 * sube
+    return d
+
+
+LANZADOR_PASOS = (0.3, 0.9, 1.5, 2.1)   # pisotones (tiembla la pantalla); el launcher los lee de render_launcher.py
+
+
+@clip(5.2)
+def Launcher_Intro(t, T):
+    """Gallina GIGANTE para el launcher (render_launcher.py la pinta sobre el escritorio): cruza de perfil con
+    pisotones pesados, se para con un saltito girándose hacia ti, se agacha, ladea la cabeza con curiosidad y abre el
+    pico enorme acercándose, como si fuera a tragarte (de ahí sale la ventana del launcher)."""
+    d = {}
+    # 1) Andar de gigante (0 - 2.4): ciclo lento de 1.2 s, pasos largos, cuerpo que se hunde en cada pisotón.
+    if t < 2.4:
+        p = (t / 1.2) % 1.0
+        d["root"] = (0, 0, 90)                                   # de perfil, mirando a la derecha de la pantalla
+        golpe = max(0.0, cos(2 * TAU * p + 0.35)) ** 6           # aplastón justo al apoyar
+        d["hips"] = (8 + 4 * cos(2 * TAU * p), 9 * sin(TAU * p), 9 * cos(TAU * p))
+        d["hips_l"] = (0.016 * sin(TAU * p), 0, 0.03 * cos(2 * TAU * p) - 0.02 * golpe)
+        d["scale"] = 1 + 0.05 * cos(2 * TAU * p + 0.2) - 0.07 * golpe
+        empuje = sin(2 * TAU * p) + 0.35 * sin(4 * TAU * p)
+        d["spine"] = (3, -4 * sin(TAU * p), -4 * cos(TAU * p))
+        d["neck_01"] = (8 + 10 * empuje, -4 * sin(TAU * p), 0)
+        d["neck_02"] = (4 + 7 * empuje, 0, 0)
+        d["head"] = (-18 - 16 * empuje, -5 * sin(TAU * p), 0)
+        alas(d, 14 + 8 * cos(2 * TAU * p), 12 + 10 * cos(2 * TAU * p + 0.7))
+        d["tail"] = (6 * cos(2 * TAU * p), 0, -18 * sin(TAU * p - 0.5))
+        d["eye"] = 1.0 if (t % 1.7) > 0.12 else 0.2
+        patas(d, p, 0.12, 0.11, apoyo=0.5)
+        return d
+
+    # 2) Se para y se gira hacia la cámara con un saltito (2.4 - 2.95).
+    giro = K(t, (2.4, 90), (2.75, -8, "o"), (2.95, 0))
+    salto = pulso(t, 2.45, 0.42)
+    d["root"] = (0, 0, giro)
+    d["root_l"] = (0, 0, 0.09 * salto)
+    aterriza = math.exp(-9 * max(0.0, t - 2.87)) * cos(TAU * 3 * max(0.0, t - 2.87)) if t > 2.87 else 0.0
+    # 3) Se agacha (2.95 - 3.35) y se queda mirando: postura baja, cuello estirado hacia la cámara.
+    baja = K(t, (2.95, 0), (3.3, 1, "o"))
+    # 5) Abre el pico enorme y se acerca (4.3 - 5.2).
+    come = K(t, (4.3, 0), (4.85, 1, "o"))
+    d["scale"] = 1 + 0.08 * salto - 0.22 * aterriza - 0.08 * baja + 0.06 * come
+    d["hips"] = (14 * baja + 12 * come, 0, 0)
+    d["hips_l"] = (0, 0, -0.07 * baja - 0.04 * max(0.0, aterriza))
+    d["spine"] = (8 * baja + 6 * come, 0, 0)
+    d["neck_01"] = (-6 * baja + 22 * come, 0, 0)
+    d["neck_02"] = (-8 * baja + 14 * come, 0, 0)
+    # 4) Cabeceos de curiosidad (3.35 - 4.3): ladea la cabeza a un lado y a otro, secos, como las gallinas.
+    lado = K(t, (3.35, 0), (3.45, 26, "o"), (3.75, 26), (3.85, -24, "o"), (4.1, -24), (4.2, 8, "o"), (4.3, 0))
+    gira = K(t, (3.35, 0), (3.45, 14, "o"), (3.75, 14), (3.85, -12, "o"), (4.1, -12), (4.3, 0))
+    d["head"] = (-24 * baja - 30 * come - 4 * salto, lado * (1 - come), gira * (1 - come))
+    d["jaw"] = 62 * come + 8 * salto
+    alas(d, 12 + 30 * salto + 10 * come, 8 + 34 * salto, 0, 12 * salto)
+    d["tail"] = (12 * salto + 8 * baja + 14 * come, 0, 6 * sin(TAU * 3 * t) * baja)
+    d["fan"] = 0.4 * salto + 0.8 * come
+    d["eye"] = 1.15 + 0.3 * come
+    if 3.95 < t < 4.1:
+        d["eye"] = parpadeo(t, 3.96, 0.13) * 1.15
+    for lado_p, k in (("L", 1), ("R", -1)):
+        d["ankle." + lado_p] = (0.02 * k * baja, 0, 0.03 * salto)
+        d["foot." + lado_p] = 20 * salto
+    return d
+
+
 # ---------------------------------------------------------------- muelles (movimiento secundario)
 GESTOS = {"Peck", "Eat", "Cluck", "Look_Around", "Flap", "Panic", "Idle_Preen", "Land", "Stand_Up"}
 AEREOS = {"Air", "Fall", "Carried"}
@@ -659,6 +815,11 @@ def resolver(c, i):
         pose[foot][0] = a_local(foot, q_w.inverted() @ q_pie)
         pose[toes][0] = a_local(toes, q_rig((c["toes_rx." + lado][i], 0, 0)))
 
+    # Papada: se desplaza con el pico de abajo (canal "papada", en ejes del rig).
+    if "papada" in c:
+        for w in ("wattle.L", "wattle.R"):
+            pose[w][1] = Rb[w].inverted() @ Vector(c["papada"][i])
+
     e = float(c["eye"][i])
     ancho = 1 + (e - 1) * 0.6 if e > 1 else 1.0
     for lado in ("L", "R"):
@@ -689,6 +850,15 @@ def canales(fn, n, loop):
                 c[k][i] = v
             else:
                 c[k][i] = v
+    # La papada cuelga de la cabeza, pero va bajo el pico de abajo: al abrir el pico baja y se adelanta con él (si
+    # no, el pico de abajo baja por delante de ella y se ve la papada dentro de la boca). Sólo un poco de giro: con
+    # el giro entero de la mandíbula se metería en el pecho.
+    abre = np.sin(np.radians(np.clip(c["jaw"][:, 0], 0, 90)))
+    c["papada"] = np.zeros((frames, 3))
+    c["papada"][:, 1] = -0.035 * abre      # hacia delante (la gallina mira a -Y)
+    c["papada"][:, 2] = -0.08 * abre       # hacia abajo
+    for s in (".L", ".R"):
+        c["wattle" + s][:, 0] += 0.3 * c["jaw"][:, 0]
     # Abrir el abanico: las plumas laterales se separan hacia fuera.
     for hueso, ang in (("tail_high.L", 24), ("tail_high.R", -24), ("tail_low.L", 34), ("tail_low.R", -34)):
         c[hueso][:, 1] += ang * c["fan"]
@@ -740,6 +910,14 @@ def escribir(nombre, c, n):
             curva(ruta + "scale", j, ss[:, j], b)
     return act
 
+
+# Se puede volver a pasar sobre el propio Gallina_Final_anim.blend: las Actions de antes se sustituyen.
+if arm.animation_data:
+    arm.animation_data.action = None
+for nombre in CLIPS:
+    viejo = bpy.data.actions.get(nombre)
+    if viejo is not None:
+        bpy.data.actions.remove(viejo)
 
 for nombre, (fn, n, loop) in CLIPS.items():
     act = escribir(nombre, canales(fn, n, loop), n)
