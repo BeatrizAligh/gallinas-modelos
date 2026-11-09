@@ -980,6 +980,66 @@ def Defeat(t):
     return p
 
 
+# ================================================================ gestos (rueda de gestos del juego)
+def flapf(x):
+    """Aleteo de un tiempo: sube rápido pasándose un poco y baja suave."""
+    x %= 1.0
+    return back(x * 2.2) if x < 0.45 else 1 - ease((x - 0.45) / 0.55)
+
+
+@clip(1.6, True)
+def Dance(t):
+    """El baile del pollito: codos que aletean como alas, rodillas al compás, cadera de lado a lado y la cabeza
+    que picotea adelante y atrás como una gallina. Dos tiempos por ciclo, cada aleteo con rebote."""
+    beat = (t * 4) % 1.0
+    bounce = abs(math.sin(TAU * t * 2))                                            # 4 flexiones por ciclo
+    sway = S(t)
+    peck = K(beat, (0, 0), (0.18, 1), (0.5, -0.4), (1, 0))
+    p = Pose().torso(hips=(2, sway * 10, sway * 6), spine=(2 + bounce * 2, -sway * 5, -sway * 3),
+                     chest=(-2 + peck * 4, -sway * 6, sway * 2), neck=(-peck * 10, 0, 0),
+                     head=(-peck * 14 + 4, S(t - 0.08, 8), sway * 6))
+    knee = 10 + bounce * 16
+    p.leg('L', 0, knee + max(0, sway) * 8, foot=-2, spread=4).leg('R', 0, knee + max(0, -sway) * 8, foot=-2, spread=4)
+    p.hips = Vector((sway * 0.025 * H, 0, -drop_for(knee) + bounce * 0.012 * H))
+    for side, o in (('L', 0.0), ('R', 0.03)):          # el derecho, un pelín tarde: no parece un robot
+        f = flapf(t * 4 + o)
+        u = D(-0.3, 1.0, -0.5 + 0.55 * f)             # el codo sale hacia fuera (y algo atrás) y sube con el aleteo
+        l = D(0.6, -0.75, -0.42)             # la mano vuelve delante del sobaco, por debajo del pecho (ala plegada)
+        p.arm(side, u, l, palm=PALM_DOWN, curl=0.9, wrist=10, shrug=6 * f)
+    return p
+
+
+@clip(1.2, True)
+def Wave(t):
+    """¡Hola!: brazo derecho arriba saludando con la mano abierta (antebrazo de lado a lado con retraso en la mano),
+    cabeza ladeada con una sonrisa y el peso en la pierna contraria."""
+    w = S(t * 2)                                       # dos vaivenes por ciclo
+    wl = S(t * 2 - 0.07)                               # la mano llega un poco después que el antebrazo
+    p = Pose().torso(hips=(1, -4, -4), spine=(1, 4, 5), chest=(-3, 6, 6 + w * 1.5), neck=(0, 4, 0),
+                     head=(-5, 8, -14 + S(t * 2 - 0.15, 3)))
+    p.leg('L', 0, 5, spread=2).leg('R', 2, 12, foot=-4, spread=3)
+    p.hips = Vector((-0.012 * H, 0, -drop_for(8)))
+    # Codo fuera a la altura del hombro (brazos chibi cortos: así la mano queda por encima y lejos del sombrero).
+    p.arm('R', D(0.1, 1.0, 0.2), D(0.05, 0.35 + 0.4 * w, 1.0), palm=PALM_FWD, curl=-0.35, wrist=-12 * wl, shrug=10)
+    relaxed_arm(p, 'L', 4 + S(t - 0.1, 3), 16, curl=0.35)
+    return p
+
+
+@clip(1.4, True)
+def Taunt(t):
+    """Burla: manos en jarras, se echa atrás riéndose a carcajadas (hombros que se sacuden) y menea la cadera."""
+    laugh = abs(math.sin(TAU * t * 5)) * K(t, (0, 0.4), (0.3, 1), (0.8, 1), (1, 0.4))
+    wig = S(t * 2)
+    p = Pose().torso(hips=(-2, wig * 8, wig * 4), spine=(-8 - laugh * 3, -wig * 3, 0), chest=(-10 - laugh * 5, -wig * 4, 0),
+                     neck=(-6, 0, 0), head=(-14 - laugh * 8, S(t * 2, 12), S(t - 0.1, 4)))
+    p.leg('L', 0, 8 + max(0, wig) * 10, spread=6).leg('R', 0, 8 + max(0, -wig) * 10, spread=6)
+    p.hips = Vector((wig * 0.02 * H, 0, -drop_for(9) + laugh * 0.006 * H))
+    for side in 'LR':
+        # Puño apoyado en la cadera: codo hacia fuera y algo atrás, antebrazo que vuelve hacia la cintura.
+        p.arm(side, D(-0.25, 1.0, -0.75), D(0.35, -0.85, -0.35), palm=PALM_DOWN, curl=0.85, wrist=15, shrug=2 + laugh * 5)
+    return p
+
+
 # ================================================================ capa de brazos (pecho, brazos y cabeza)
 def upper():
     p = Pose().torso()

@@ -715,6 +715,75 @@ def Victory(t, T):
     return d
 
 
+# ---------------------------------------------------------------- gestos (rueda de gestos del juego; en el aire)
+@clip(1.6, loop=True)
+def Dance(t, T):
+    """Baile en el aire: aleteo a tiempo, el cuerpo se balancea de lado a lado, la cabeza cabecea al compas,
+    la cresta y la cola se abren en cada golpe."""
+    d = {}
+    u = t / T
+    f = 4 * u                                    # cuatro aleteos por ciclo, uno por tiempo
+    beat = (u * 4) % 1.0
+    vaiven = sin(TAU * u)
+    cuerpo(d, 30, mira=10)
+    aleteo(d, f, 50, media=16, recoge=0.5, tuerce=-4)
+    bote(d, f, 0.03)
+    suma(d, "hips", (0, 14 * vaiven, 10 * vaiven))
+    suma(d, "chest", (0, -6 * vaiven, -6 * vaiven))
+    cab = K(beat, (0, 0), (0.15, 1, "o"), (0.55, -0.5), (1, 0))
+    mirar(d, -18 * vaiven, 14 * cab, g=12 * vaiven)
+    suma(d, "tail_01", (-26, 0, -14 * vaiven))
+    d["fan"] = 18 + 16 * pulso(beat, 0.0, 0.4)
+    d["crest"] = 8 + 22 * pulso(beat, 0.05, 0.35)
+    d["jaw"] = 10 * pulso(beat, 0.1, 0.3)
+    patas_colgando(d, 30, abre=0.4 + 0.3 * vaiven, garra=-10, delante=-18)
+    d["eye"] = 0.85
+    return d
+
+
+@clip(1.4, loop=True)
+def Wave(t, T):
+    """¡Hola!: reverencia en el aire. Baja el pecho y la cabeza dos veces (como quien saluda con la cabeza), la cresta
+    se levanta y abre la cola; el aleteo sigue tranquilo."""
+    d = {}
+    u = t / T
+    f = 3 * u
+    inclina = K(u, (0, 0), (0.18, 1, "o"), (0.38, 0.1), (0.55, 1, "o"), (0.78, 0.1), (1, 0))
+    cuerpo(d, 34 + 14 * inclina, mira=12)
+    aleteo(d, f, 44, media=14, recoge=0.55, tuerce=-4)
+    bote(d, f, 0.022)
+    mirar(d, 0, 26 * inclina, g=8)
+    suma(d, "tail_01", (-30 + 12 * inclina, 0, 0))
+    d["fan"] = 20 + 10 * inclina
+    d["crest"] = 18 + 14 * inclina
+    patas_colgando(d, 34, abre=0.3, garra=8, delante=-22)
+    d["eye"] = 0.75
+    return d
+
+
+@clip(1.2, loop=True)
+def Taunt(t, T):
+    """Burla: se ríe a carcajadas en el aire. Pico que castañetea, cabeza que niega, la cresta de punta y una ceja
+    arriba, el cuerpo se sacude con cada carcajada."""
+    d = {}
+    u = t / T
+    f = 3 * u
+    carcajada = abs(sin(TAU * u * 5))
+    cuerpo(d, 26 - 6 * carcajada, mira=0)
+    aleteo(d, f, 42, media=14, recoge=0.55, tuerce=-4)
+    bote(d, f, 0.02)
+    suma(d, "chest", (-6 * carcajada, 0, 0))
+    mirar(d, 22 * sin(TAU * u * 2), -16 - 8 * carcajada)
+    d["jaw"] = 8 + 30 * carcajada
+    d["crest"] = 30
+    d["ceja"] = 0.5
+    suma(d, "tail_01", (-24, 0, 16 * sin(TAU * u * 4)))
+    d["fan"] = 30
+    patas_colgando(d, 26, abre=0.3, garra=6, delante=-20)
+    d["eye"] = 0.65
+    return d
+
+
 # ---------------------------------------------------------------- movimiento secundario
 GESTOS = {"Dive_In", "Dive_Out", "Grab", "Carry_Struggle", "Drop", "Screech", "Shot", "Crash", "Recover", "Takeoff", "Land"}
 

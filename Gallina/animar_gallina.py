@@ -546,6 +546,83 @@ def Victory(t, T):
     return d
 
 
+# ---------------------------------------------------------------- gestos (rueda de gestos del juego)
+@clip(1.6, loop=True)
+def Dance(t, T):
+    """El baile del pollito de verdad: aletea a tiempo (dos golpes de ala por compas), menea la cadera, pasito a
+    pasito y la cabeza va y viene como un metronomo. Cuatro tiempos por ciclo."""
+    d = {}
+    u = t / T
+    beat = (u * 4) % 1.0
+    golpe = back(min(1.0, beat * 3.0)) * (1 - ease((beat - 0.35) / 0.65))          # sube de golpe y baja suave
+    rebote = abs(sin(TAU * u * 2))
+    meneo = sin(TAU * u)
+    d["root_l"] = (0, 0, 0.018 * rebote)
+    d["scale"] = 1 + 0.03 * (rebote - 0.5)
+    d["hips"] = (-4 * rebote, 6 * meneo, 16 * meneo)
+    d["spine"] = (3 * golpe, -3 * meneo, -6 * meneo)
+    cab = K(beat, (0, 0), (0.15, 1, "o"), (0.5, -0.6), (1, 0))                    # picoteo al compas
+    d["neck_01"] = (10 * cab, 0, -8 * meneo)
+    d["neck_02"] = (8 * cab, 0, -10 * meneo)
+    d["head"] = (-14 * cab, 8 * meneo, -14 * meneo)
+    d["jaw"] = 10 * pulso(beat, 0.1, 0.3)
+    alas(d, 30 + 42 * golpe, 18 + 40 * golpe, -6, 22 * golpe)
+    d["tail"] = (8 + 6 * rebote, 0, -18 * meneo)
+    d["fan"] = 0.35 + 0.4 * golpe
+    patas(d, u * 2, 0.012, 0.03, apoyo=0.6)
+    d["eye"] = min(parpadeo(t, 0.55 * T), 0.95)
+    return d
+
+
+@clip(1.2, loop=True)
+def Wave(t, T):
+    """¡Hola!: levanta el ala izquierda bien alta y la agita (la punta va con retraso), ladea la cabeza y da un
+    saltito de alegria al principio de cada vaiven."""
+    d = {}
+    u = t / T
+    w = sin(TAU * u * 2)
+    wp = sin(TAU * u * 2 - 0.7)
+    salto = pulso(u, 0.0, 0.25) + pulso(u, 0.5, 0.25)
+    d["root_l"] = (0, 0, 0.03 * salto)
+    d["hips"] = (-3, -5, 6)
+    d["spine"] = (0, -5, 4)
+    d["neck_02"] = (-4, 0, 8)
+    d["head"] = (-6, 18 + 4 * w, 14)
+    d["jaw"] = 8 * salto
+    ala(d, "L", 38 + 12 * w, 126 + 18 * w, -18, 34 * wp)     # bien arriba (sube) y algo abierta, la punta con retraso
+    ala(d, "R", 4, 3)
+    d["tail"] = (6, 0, 8 * w)
+    d["fan"] = 0.4
+    for lado in ("L", "R"):
+        d["ankle." + lado] = (0, 0, 0.02 * salto)
+        d["foot." + lado] = 16 * salto
+    d["eye"] = 0.8
+    return d
+
+
+@clip(1.2, loop=True)
+def Taunt(t, T):
+    """Burla de gallina: se agacha de frente, levanta la cola y la menea muy rapido abriendo el abanico, mira por
+    encima del hombro y cacarea burlona."""
+    d = {}
+    u = t / T
+    meneo = sin(TAU * u * 6)
+    risa = abs(sin(TAU * u * 4))
+    d["hips"] = (18, 0, 6 * meneo)
+    d["spine"] = (6, 0, -4 * meneo)
+    d["root_l"] = (0, 0, -0.01)
+    d["neck_01"] = (-10, 0, 22)
+    d["neck_02"] = (-8, 0, 30)
+    d["head"] = (4, -12, 44 + 6 * sin(TAU * u * 2))
+    d["jaw"] = 26 * risa
+    d["tail"] = (-28, 0, 34 * meneo)
+    d["fan"] = 1.0
+    alas(d, 22 + 8 * risa, 14 + 10 * risa, 0, 10 * meneo)
+    d["scale"] = 1 + 0.02 * risa
+    d["eye"] = 0.6
+    return d
+
+
 # ---------------------------------------------------------------- presentacion del juego
 @clip(4.2)
 def Intro(t, T):
