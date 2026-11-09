@@ -1,6 +1,8 @@
 """Crea las animaciones del gavilan sobre el rig, por linea de comandos.
 
-    blender --background --disable-autoexec "Gavilan_rig.blend" --python animar_gavilan.py -- "<salida sin extension>"
+    blender --background --disable-autoexec "<rig>.blend" --python animar_gavilan.py -- "Gavilan_Final_anim"
+
+(<rig>.blend sale de rig_gavilan.py y es temporal: el repo solo guarda Gavilan_Final_anim.blend/.fbx)
 
 Genera <salida>.blend (una Action por clip) y <salida>.fbx (malla + esqueleto + todos los clips).
 Todo va en el sitio: el movimiento y la inclinacion por velocidad los pone HawkController.
@@ -245,7 +247,8 @@ def Boost(t, T):
 
 # ---------------------------------------------------------------- picado
 def pose_picado(d, x=1.0):
-    cuerpo(d, mezcla(PITCH, 80, x), mira=mezcla(8, 0, x))
+    # En picado la cabeza sigue al cuerpo y mira a la presa: doblar el cuello 90 grados estiraba la garganta.
+    cuerpo(d, mezcla(PITCH, 80, x), mira=mezcla(8, 45, x))
     alas(d, tuerce=mezcla(20, 0, x), pliega=x)
     d["aero"] = 1.0
     suma(d, "tail_01", (mezcla(-27, -39, x), 0, 0))
@@ -791,7 +794,9 @@ for s in ("L", "R"):
             dir_b = (Tb[b] - Hb[b]).normalized()
             dir_b.z = 0
             EJE_DEDO[b] = dir_b.normalized().cross(BAJO).normalized()
-NORMAL_COLA = Vector((0, 0.66, 0.75)).normalized()
+_d_cola = (Tb["tail_02"] - Hb["tail_01"]).normalized()
+NORMAL_COLA = Vector((0, -_d_cola.z, _d_cola.y))     # perpendicular a la cola, hacia arriba y atras
+FAN_ESCALA = 0.35     # 52 grados de clip -> 18: la punta se ensancha ~25 %, no ~80 %
 
 
 def plegado_izquierda(envergadura):
@@ -886,9 +891,15 @@ def resolver(c, i):
         for f in ("feather_1.", "feather_2.", "feather_3."):
             pose[f + lado][2] = Vector((1, max(0.35, 1 - 0.55 * p), 1))
     pose["jaw"][2] = Vector((1, float(c["jaw_s"][i]), 1))
-    ang = float(c["fan"][i])
-    pose["tail_fan.L"][0] = a_local("tail_fan.L", Quaternion(NORMAL_COLA, math.radians(-ang))) @ pose["tail_fan.L"][0]
-    pose["tail_fan.R"][0] = a_local("tail_fan.R", Quaternion(NORMAL_COLA, math.radians(ang))) @ pose["tail_fan.R"][0]
+    # La cola es una sola pieza: el abanico abre menos que unas plumas sueltas, o los lados se estiran.
+    ang = float(c["fan"][i]) * FAN_ESCALA
+    # Los lados cuelgan de tail_01 pero el centro dobla con tail_02: girar la mitad de esa flexion desde la base
+    # lleva la punta lateral al mismo sitio que la central (asi no se rasga la cola al doblarse).
+    q02 = Rb["tail_02"] @ pose["tail_02"][0] @ Rb["tail_02"].inverted()
+    mitad = Quaternion().slerp(q02, 0.5)
+    for lado, sg in (("L", -1), ("R", 1)):
+        b = "tail_fan." + lado
+        pose[b][0] = a_local(b, Quaternion(NORMAL_COLA, math.radians(sg * ang)) @ mitad) @ pose[b][0]
     return pose
 
 
@@ -1013,4 +1024,6 @@ ad.action_slot = act.slots[0]
 scene.frame_start, scene.frame_end = int(act.frame_start), int(act.frame_end)
 scene.frame_set(0)
 bpy.ops.wm.save_as_mainfile(filepath=blend)
+bpy.ops.file.make_paths_relative()     # la textura queda como //Final/... si esta junto al .blend
+bpy.ops.wm.save_mainfile()
 print("ANIM_OK", len(CLIPS), blend, fbx)

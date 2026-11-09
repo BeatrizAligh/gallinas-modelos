@@ -1,18 +1,29 @@
 """Riggea el gavilan desde la linea de comandos.
 
-    blender --background --disable-autoexec "Gavilan.blend" --python rig_gavilan.py -- "<salida sin extension>"
+    blender --background --factory-startup --python rig_gavilan.py -- "<salida sin extension>" "Final/Gavilan_Final.fbx" "Final/Gavilan_Cafe.png"
 
-Genera <salida>.blend y <salida>.fbx (malla + esqueleto, sin animaciones). No modifica Gavilan.blend ni la textura.
+Genera <salida>.blend y <salida>.fbx (malla + esqueleto, sin animaciones). No modifica el FBX ni las texturas.
+Despues: animar_gavilan.py sobre <salida>.blend. El rig intermedio no se guarda en el repo: solo queda Gavilan_Final_anim.
 El espacio del rig es el del modelo: mira a -Y, su izquierda es +X y los pies estan en z = 0.
-Si cambia la malla hay que volver a medir las coordenadas de HUESOS y DEDOS.
+Modelo final (2026-11-08): la mandibula es una pieza aparte y ya no hay huecos en los hombros.
+Si cambia la malla hay que volver a medir las coordenadas de HUESOS (las de dedos, pico, ojos y cola salen de la malla).
 """
-import bpy, bmesh, sys
+import bpy, bmesh, sys, os
 import numpy as np
 from mathutils import Matrix, Vector
 
-out_base = sys.argv[sys.argv.index("--") + 1]
-
-CENTRO_X = -0.00082   # plano de simetria medido
+args = sys.argv[sys.argv.index("--") + 1:]
+out_base = args[0]
+bpy.ops.wm.read_factory_settings(use_empty=True)
+bpy.ops.import_scene.fbx(filepath=os.path.abspath(args[1]))
+img = bpy.data.images.load(os.path.abspath(args[2]), check_existing=True)
+for m in bpy.data.materials:
+    for nd in (m.node_tree.nodes if m.node_tree else []):
+        if nd.type == "TEX_IMAGE":     # la interfaz de Blender esta en espanol: los nodos se buscan por tipo
+            nd.image = img
+for i in list(bpy.data.images):
+    if i != img and i.users == 0:
+        bpy.data.images.remove(i)
 
 
 def smooth(a, b, x):
@@ -22,21 +33,23 @@ def smooth(a, b, x):
 
 
 def V(x, y, z):
-    return Vector((x, y, z))
+    return Vector((float(x), float(y), float(z)))
 
 
 # ---------------------------------------------------------------- malla
 obj = next(o for o in bpy.data.objects if o.type == "MESH")
 me = obj.data
-me.transform(Matrix.Translation((-CENTRO_X, 0, 0)) @ obj.matrix_world)
+me.transform(obj.matrix_world)
+_xs = [v.co.x for v in me.vertices]
+CENTRO_X = (min(_xs) + max(_xs)) / 2   # plano de simetria
+me.transform(Matrix.Translation((-CENTRO_X, 0, 0)))
 obj.matrix_world = Matrix.Identity(4)
 obj.name, me.name = "Gavilan", "Gavilan_Mesh"
 for mat in me.materials:
     if mat:
         mat.name = "Gavilan_Mat"
-n = len(me.vertices)
+print("MALLA centro x", round(CENTRO_X, 5))
 
-img = next(i for i in bpy.data.images if i.size[0] > 256)
 pix = np.empty(img.size[0] * img.size[1] * 4, dtype=np.float32)
 img.pixels.foreach_get(pix)
 pix = pix.reshape(img.size[1], img.size[0], 4)
@@ -46,119 +59,52 @@ def texel(uv):
     return pix[int(uv[1] * (img.size[1] - 1)) % img.size[1], int(uv[0] * (img.size[0] - 1)) % img.size[0]][:3]
 
 
-# El atlas tiene fondo negro: cada tapa usa el texel mediano de sus vecinas, ni el negro de la junta ni un claro suelto.
+def islas(me):
+    n = len(me.vertices)
+    adj = [[] for _ in range(n)]
+    for e in me.edges:
+        a, b = e.vertices
+        adj[a].append(b); adj[b].append(a)
+    lab = -np.ones(n, int); k = 0
+    for i in range(n):
+        if lab[i] >= 0:
+            continue
+        pila = [i]; lab[i] = k
+        while pila:
+            c = pila.pop()
+            for j in adj[c]:
+                if lab[j] < 0:
+                    lab[j] = k; pila.append(j)
+        k += 1
+    return lab, k, adj
+
+
+# Huecos: solo se tapan los del cuerpo y las alas. Los ojos y las motas son conchas abiertas por detras, pegadas a la piel.
+lab, n_isl, adj = islas(me)
+grandes = set(int(i) for i in np.argsort(-np.bincount(lab))[:3])
 bm = bmesh.new(); bm.from_mesh(me)
+bm.verts.ensure_lookup_table()
 capa_uv = bm.loops.layers.uv.active
-
-# La boca es un valle cerrado alrededor de la mandibula: se localiza por sus aristas concavas.
-def en_boca(v):
-    return v.co.y < -0.12 and 0.52 < v.co.z < 0.575 and abs(v.co.x) < 0.04
-
-
-bm.normal_update()
-pliegue = set()
-for e in bm.edges:
-    if len(e.link_faces) == 2 and en_boca(e.verts[0]) and en_boca(e.verts[1]) and e.calc_face_angle_signed() < -1.1:
-        pliegue.update(v.index for v in e.verts)
-
-abiertos = [e for e in bm.edges if e.is_boundary]
-print("HUECOS bordes abiertos antes de tapar", len(abiertos))
-nuevas = bmesh.ops.holes_fill(bm, edges=abiertos, sides=0)["faces"]
-# holes_fill se salta los huecos cuyo borde incluye una arista no-manifold: esos se cierran a mano.
-restantes = [e for e in bm.edges if e.is_boundary]
-while restantes:
-    extremos = [v for e in restantes for v in e.verts if sum(x.is_boundary for x in v.link_edges) == 1]
-    v = extremos[0] if extremos else restantes[0].verts[0]
-    v0, anillo, previa = v, [v], None
-    while True:
-        e = next((x for x in v.link_edges if x.is_boundary and x != previa), None)
-        if e is None:
-            break
-        v, previa = e.other_vert(v), e
-        if v == v0:
-            break
-        anillo.append(v)
-    nuevas.append(bm.faces.new(anillo))
-    restantes = [e for e in bm.edges if e.is_boundary]
-print("HUECOS tapas creadas", len(nuevas))
+abiertos = [e for e in bm.edges if e.is_boundary and lab[e.verts[0].index] in grandes]
+print("HUECOS bordes abiertos en cuerpo y alas", len(abiertos))
+nuevas = bmesh.ops.holes_fill(bm, edges=abiertos, sides=0)["faces"] if abiertos else []
 es_nueva = set(nuevas)
-# Hombros y raices de ala llevan el rojizo del costado: entre sus vecinas solo hay tonos amarillentos de la junta.
-PUNTO_PLUMAJE = Vector((0.16, 0.05, 0.25))
-cara_plumaje = min((f for f in bm.faces if f not in es_nueva), key=lambda f: (f.calc_center_median() - PUNTO_PLUMAJE).length)
-uv_plumaje = sum((l[capa_uv].uv for l in cara_plumaje.loops), Vector((0, 0))) / len(cara_plumaje.loops)
-print("HUECOS color de hombros", texel(uv_plumaje).round(3))
-hombros = [f for f in nuevas if len(f.verts) >= 30]     # los huecos donde encaja la raiz de cada ala
-assert len(hombros) == 2, f"esperaba 2 huecos de hombro, hay {len(hombros)}"
-bordes_hombro = [set(f.verts) for f in hombros]
-color_tapa = {}
+# El atlas tiene fondo negro: cada tapa usa el texel mediano de sus vecinas, ni el negro de la junta ni un claro suelto.
 for f in nuevas:
     uvs = [l[capa_uv].uv.copy() for e in f.edges for c in e.link_faces if c not in es_nueva for l in c.loops]
     uvs.sort(key=lambda u: float(texel(u).sum()))
-    color_tapa[f] = uvs[len(uvs) // 2]
-    # La raiz del ala se ve al recogerla.
-    c = f.calc_center_median()
-    if 9 <= len(f.verts) <= 14 and abs(c.x) > 0.13 and 0.36 < c.z < 0.45:
-        color_tapa[f] = uv_plumaje
-for f, uv_vec in color_tapa.items():
     for l in f.loops:
-        l[capa_uv].uv = uv_vec
+        l[capa_uv].uv = uvs[len(uvs) // 2]
     f.smooth = True
-tris = bmesh.ops.triangulate(bm, faces=nuevas, quad_method="BEAUTY", ngon_method="BEAUTY")["faces"]
-print("HUECOS triangulos de tapa", len(tris), "vertices", len(bm.verts))
-
-# El hombro queda a la vista cuando el ala se mueve: su tapa debe continuar la superficie del cuerpo.
-# Se densifica, se relaja entre los bordes y se abomba hacia fuera, con el color del plumaje de alrededor.
-for borde in bordes_hombro:
-    tapa = [f for f in tris if f.is_valid and all(v in borde for v in f.verts)]
-    caras, interior = tapa, []
-    for _ in range(2):
-        r_poke = bmesh.ops.poke(bm, faces=caras)
-        interior += r_poke["verts"]
-        caras = r_poke["faces"]
-    for _ in range(60):
-        nuevo = {v: sum((e.other_vert(v).co for e in v.link_edges), Vector()) / len(v.link_edges) for v in interior}
-        for v, p in nuevo.items():
-            v.co = p
-    # Distancia al borde en aristas: abomba mas el centro que los lados.
-    nivel = {v: 0 for v in borde}
-    frente = list(borde)
-    while frente:
-        sig = []
-        for v in frente:
-            for e in v.link_edges:
-                o = e.other_vert(v)
-                if o in interior and o not in nivel:
-                    nivel[o] = nivel[v] + 1; sig.append(o)
-        frente = sig
-    tope = max(nivel.values())
-    lado = 1.0 if interior[0].co.x > 0 else -1.0
-    for v in interior:
-        v.co.x += lado * 0.016 * (nivel.get(v, tope) / tope) ** 0.5
-    for f in caras:
-        f.smooth = True
-        for l in f.loops:
-            l[capa_uv].uv = uv_plumaje
-print("HUECOS vertices tras cubrir los hombros", len(bm.verts))
+if nuevas:
+    bmesh.ops.triangulate(bm, faces=nuevas, quad_method="BEAUTY", ngon_method="BEAUTY")
+print("HUECOS tapas", len(nuevas))
 bm.to_mesh(me); bm.free()
 n = len(me.vertices)
 vco = np.array([list(v.co) for v in me.vertices])
 
-adj = [[] for _ in range(n)]
-for e in me.edges:
-    a, b = e.vertices
-    adj[a].append(b); adj[b].append(a)
-lab = -np.ones(n, int); n_isl = 0
-for i in range(n):
-    if lab[i] >= 0:
-        continue
-    pila = [i]; lab[i] = n_isl
-    while pila:
-        c = pila.pop()
-        for k in adj[c]:
-            if lab[k] < 0:
-                lab[k] = n_isl; pila.append(k)
-    n_isl += 1
-assert n_isl == 28, f"esperaba 28 piezas, hay {n_isl}"
+lab, n_isl, adj = islas(me)
+print("MALLA piezas", n_isl)
 tam = np.bincount(lab)
 orden_isl = np.argsort(-tam)
 i_cuerpo = orden_isl[0]
@@ -167,13 +113,33 @@ i_ala = {".L": i_a if vco[lab == i_a, 0].mean() > 0 else i_b, ".R": i_b if vco[l
 cuerpo = np.where(lab == i_cuerpo)[0]
 ala_idx = {s: np.where(lab == i_ala[s])[0] for s in i_ala}
 otras = [i for i in range(n_isl) if i not in (i_cuerpo, i_a, i_b)]
-ojo = {}
+ojo, pico_bajo = {}, None
 for isl in otras:
     c = vco[lab == isl].mean(0)
-    if c[2] > 0.55:
+    if c[2] > 0.5 and abs(c[0]) < 0.01 and c[1] < -0.09:
+        pico_bajo = np.where(lab == isl)[0]          # la mandibula: pieza central bajo el pico
+    elif c[2] > 0.55 and abs(c[0]) > 0.02:
         ojo[".L" if c[0] > 0 else ".R"] = np.where(lab == isl)[0]
-assert len(ojo) == 2
-adornos = [isl for isl in otras if vco[lab == isl].mean(0)[2] <= 0.55]   # motas del pecho y de las alas
+assert len(ojo) == 2 and pico_bajo is not None, "no encuentro los ojos o la mandibula"
+centro_ojo = {s: vco[ojo[s]].mean(0) for s in ojo}
+adornos = [isl for isl in otras if vco[lab == isl].mean(0)[2] <= 0.5]   # motas del pecho y de las alas
+print("MALLA motas", len(adornos))
+
+# Mandibula: bisagra en su extremo trasero, punta en el delantero.
+pj = vco[pico_bajo]
+atras = pj[pj[:, 1] > pj[:, 1].max() - 0.012]
+delante = pj[pj[:, 1] < pj[:, 1].min() + 0.012]
+JAW_H = V(0, pj[:, 1].max() - 0.004, atras[:, 2].mean())
+JAW_T = V(0, pj[:, 1].min(), delante[:, 2].mean())
+print("PICO mandibula", tuple(round(x, 3) for x in JAW_H), "->", tuple(round(x, 3) for x in JAW_T), len(pico_bajo), "vertices")
+
+# Cola: base fija sobre la rabadilla; la punta es el vertice mas lejano hacia atras.
+BASE_COLA = np.array((0.0, 0.13, 0.265))
+PUNTA_COLA = vco[cuerpo][np.argmax(vco[cuerpo][:, 1])].copy(); PUNTA_COLA[0] = 0.0
+LARGO_COLA = float(np.linalg.norm(PUNTA_COLA - BASE_COLA))
+DIR_COLA = (PUNTA_COLA - BASE_COLA) / LARGO_COLA
+MEDIO_COLA = BASE_COLA + DIR_COLA * LARGO_COLA * 0.5
+print("COLA punta", PUNTA_COLA.round(3), "largo", round(LARGO_COLA, 3))
 
 # ---------------------------------------------------------------- esqueleto
 # Dedos: 1 = trasero, 2 = interior, 3 = central, 4 = exterior. (x, y) de la punta en la pata izquierda.
@@ -198,16 +164,16 @@ HUESOS = {
     "neck_01": ("chest", V(0, -0.015, 0.47), V(0, -0.018, 0.51)),
     "neck_02": ("neck_01", V(0, -0.018, 0.51), V(0, -0.02, 0.55)),
     "head": ("neck_02", V(0, -0.02, 0.55), V(0, -0.02, 0.70)),
-    "jaw": ("head", V(0, -0.122, 0.556), V(0, -0.205, 0.548)),
+    "jaw": ("head", JAW_H, JAW_T),
     "crest": ("head", V(0, 0.02, 0.60), V(0, 0.14, 0.64)),
-    "tail_01": ("hips", V(0, 0.13, 0.265), V(0, 0.265, 0.145)),
-    "tail_02": ("tail_01", V(0, 0.265, 0.145), V(0, 0.415, 0.02)),
+    "tail_01": ("hips", V(*BASE_COLA), V(*MEDIO_COLA)),
+    "tail_02": ("tail_01", V(*MEDIO_COLA), V(*PUNTA_COLA)),
     # Hueso sin peso: en Unity es el punto donde se sujeta la presa.
     "talons": ("hips", V(0, -0.005, 0.03), V(0, -0.005, -0.05)),
 }
 for s, k in ((".L", 1.0), (".R", -1.0)):
     HUESOS.update({
-        "eye" + s: ("head", V(0.05 * k, -0.099, 0.601), V(0.085 * k, -0.125, 0.601)),
+        "eye" + s: ("head", V(*centro_ojo[s]), V(*centro_ojo[s]) + V(0.035 * k, -0.026, 0)),
         "brow" + s: ("head", V(0.04 * k, -0.105, 0.645), V(0.105 * k, -0.075, 0.635)),
         "wing_01" + s: ("chest", V(0.15 * k, -0.03, 0.41), V(0.29 * k, -0.055, 0.43)),
         "wing_02" + s: ("wing_01" + s, V(0.29 * k, -0.055, 0.43), V(0.40 * k, -0.072, 0.43)),
@@ -216,7 +182,7 @@ for s, k in ((".L", 1.0), (".R", -1.0)):
         "feather_1" + s: ("wing_01" + s, V(0.22 * k, -0.04, 0.41), V(0.22 * k, 0.012, 0.25)),
         "feather_2" + s: ("wing_02" + s, V(0.345 * k, -0.06, 0.41), V(0.345 * k, -0.025, 0.25)),
         "feather_3" + s: ("wing_03" + s, V(0.435 * k, -0.075, 0.41), V(0.45 * k, -0.06, 0.29)),
-        "tail_fan" + s: ("tail_01", V(0.03 * k, 0.17, 0.225), V(0.105 * k, 0.40, 0.03)),
+        "tail_fan" + s: ("tail_01", V(0.03 * k, 0.17, 0.225), V(0.10 * k, PUNTA_COLA[1] - 0.01, PUNTA_COLA[2] + 0.015)),
         "leg" + s: ("hips", V(0.078 * k, -0.005, 0.19), V(0.089 * k, -0.006, 0.098)),
         "foot" + s: ("leg" + s, V(0.089 * k, -0.006, 0.098), V(0.088 * k, -0.005, 0.04)),
     })
@@ -294,12 +260,19 @@ for s in (".L", ".R"):
 q = vco[cuerpo]
 ax = np.abs(q[:, 0])
 col = ["hips", "spine", "chest", "neck_01", "neck_02", "head"]
-r, _ = cadena(q, [HUESOS[col[0]][1]] + [HUESOS[h][2] for h in col], col, [0.04, 0.04, 0.03, 0.03, 0.03])
+# El cuello es corto (8 cm) y en vuelo dobla ~60 grados: transiciones anchas para repartir el giro.
+r, _ = cadena(q, [HUESOS[col[0]][1]] + [HUESOS[h][2] for h in col], col, [0.04, 0.05, 0.06, 0.06, 0.05])
+# Pico y cara: la base del pico (z 0.51) queda por debajo del hueso de la cabeza (z 0.55), asi que la cadena
+# le daba peso de cuello y el pico se doblaba al girar la cabeza. Todo lo que esta delante del cuello va rigido a la cabeza.
+CARA = smooth(-0.05, -0.08, q[:, 1]) * smooth(0.48, 0.50, q[:, 2])
+for h in col[:-1]:
+    r[h] = r[h] * (1 - CARA)
+r["head"] = r["head"] * (1 - CARA) + CARA
 
-BASE_COLA, DIR_COLA = np.array((0.0, 0.13, 0.265)), np.array((0.0, 0.75, -0.66))
 s_cola = (q - BASE_COLA) @ DIR_COLA
+f_cola = LARGO_COLA / 0.376          # las medidas de abajo son del modelo anterior, de cola mas larga
 peso_cola = smooth(-0.015, 0.05, s_cola) * smooth(0.095, 0.15, q[:, 1]) * smooth(0.36, 0.30, q[:, 2])
-c_cola = smooth(0.135, 0.235, s_cola)
+c_cola = smooth(0.135 * f_cola, 0.235 * f_cola, s_cola)
 ancho_cola = np.maximum(0.05, np.interp(s_cola, [0.0, 0.08, 0.2, 0.36], [0.09, 0.115, 0.135, 0.135]))
 lat = q[:, 0] / ancho_cola
 abanico = smooth(0.25, 0.85, np.abs(lat)) * smooth(0.04, 0.16, s_cola)
@@ -380,49 +353,8 @@ for s, k in ((".L", 1.0), (".R", -1.0)):
     W["brow" + s][cuerpo] += ph * ceja
     ph *= 1 - ceja
 
-# Pico: la mandibula se rellena desde su centro y se detiene en el pliegue. Asi el gancho no se mueve.
-semilla = int(cuerpo[np.argmin(np.linalg.norm(q - np.array((0.0, -0.169, 0.542)), axis=1))])
-mandibula = {semilla}
-pila = [semilla]
-while pila:
-    c = pila.pop()
-    for k in adj[c]:
-        if k not in mandibula and k not in pliegue and vco[k, 1] < -0.127:
-            mandibula.add(k); pila.append(k)
-assert len(mandibula) < 120, f"el relleno se ha escapado del pico: {len(mandibula)}"
-en_jaw = np.array([int(v) in mandibula for v in cuerpo])
-W["jaw"][cuerpo] += ph * en_jaw
-ph *= 1 - en_jaw
 W["head"][cuerpo] = ph
-
-mx = vco[sorted(mandibula)]
-print("PICO extension de la mandibula", mx.min(0).round(3), mx.max(0).round(3))
-print("PICO vertices de la mandibula", len(mandibula))
-uv = me.uv_layers.active.data
-mejor_uv, mejor_nota = None, -9.0
-for l in me.loops:
-    u, v_ = uv[l.index].uv
-    c = texel((u, v_))
-    if lab[l.vertex_index] != i_cuerpo:
-        continue
-    luz = float(c.sum())
-    if luz < 0.25 or c[0] < 1.5 * c[1] + 0.02:
-        continue
-    nota = float(c[0] - c[1] - c[2]) - 0.6 * luz
-    if nota > mejor_nota:
-        h, w_ = img.size[1], img.size[0]
-        y0, x0 = int(v_ * (h - 1)), int(u * (w_ - 1))
-        ventana = pix[max(0, y0 - 6):y0 + 7, max(0, x0 - 6):x0 + 7, :3]
-        if ventana.sum(axis=2).min() > 0.2 and np.ptp(ventana, axis=(0, 1)).max() < 0.08:
-            mejor_nota, mejor_uv = nota, (float(u), float(v_))
-cruzan = 0
-for poly in me.polygons:
-    lados = {v in mandibula for v in poly.vertices}
-    if len(lados) == 2 and poly.center.y < -0.135:
-        cruzan += 1
-        for li in poly.loop_indices:
-            uv[li].uv = mejor_uv
-print("PICO caras del pliegue", cruzan, "texel boca", mejor_uv, texel(mejor_uv).round(3))
+W["jaw"][pico_bajo] += 1      # mandibula: pieza aparte, rigida
 
 for s in (".L", ".R"):
     W["eye" + s][ojo[s]] += 1
