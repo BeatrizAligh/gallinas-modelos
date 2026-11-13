@@ -93,6 +93,43 @@ def paso(fase, zancada, alto, apoyo=0.55):
     return (y, alto * sin(math.pi * x), 30 * (1 - x) - 34 * sin(math.pi * x * 0.9) * x, 26 * sin(math.pi * x))
 
 
+# ---- Pie PLANTADO (QA 0.9.3, "parece que patinan"): en Walk/Run el punto que mide el juego (cabeza del hueso toes, la
+# base de los dedos) va en el apoyo hacia atrás en línea recta y a velocidad constante, plano en el suelo; el talón se
+# levanta girando sobre esa base (antes giraba sobre el tobillo y los dedos resbalaban). En el balanceo vuelve por
+# delante con una curva de Hermite que sale y llega a la velocidad del apoyo (sin frenazo al tocar suelo). El squash
+# de la raíz (escala y bote) se descuenta en resolver(): con él los pies apoyados se movían con la raíz.
+PLANTADOS = {"Walk", "Run"}
+
+
+def _hermite(u, p0, p1, m0, m1):
+    u2, u3 = u * u, u * u * u
+    return (2 * u3 - 3 * u2 + 1) * p0 + (u3 - 2 * u2 + u) * m0 + (-2 * u3 + 3 * u2) * p1 + (u3 - u2) * m1
+
+
+def paso_plantado(fase, zancada, alto, apoyo=0.55, talon=30.0):
+    """Base de los dedos en el sitio (y, z respecto a reposo), inclinación del pie (+ = talón arriba) y dedos."""
+    fase %= 1.0
+    if fase < apoyo:
+        x = fase / apoyo
+        pie = talon * ease((x - 0.62) / 0.38)
+        return (-zancada + 2 * zancada * x, 0.0, pie, -pie)
+    x = (fase - apoyo) / (1 - apoyo)
+    m = 2 * zancada / apoyo * (1 - apoyo)               # velocidad del apoyo en unidades de x (hacia +Y = atrás)
+    y = _hermite(x, zancada, -zancada, m, m)
+    return (y, alto * sin(math.pi * x), talon * (1 - x) - 34 * sin(math.pi * x * 0.9) * x, 26 * sin(math.pi * x))
+
+
+def patas_plantadas(d, fase, zancada, alto, apoyo=0.55):
+    """Como patas(), pero el canal del tobillo sale de la base de los dedos plantada (en el espacio del mundo; resolver()
+    lo pasa al de la raíz)."""
+    for lado, f in (("L", fase), ("R", fase + 0.5)):
+        y, z, pie, dedos = paso_plantado(f, zancada, alto, apoyo)
+        base = Hb["toes." + lado] + Vector((0.0, y, z))
+        d["base." + lado] = tuple(base)                  # resolver() pone el tobillo desde aquí, ya en la raíz
+        d["foot." + lado] = pie
+        d["toes." + lado] = dedos
+
+
 def patas(d, fase, zancada, alto, apoyo=0.55):
     for lado, f, dx in (("L", fase, 1), ("R", fase + 0.5, -1)):
         y, z, pie, dedos = paso(f, zancada, alto, apoyo)
@@ -169,7 +206,7 @@ def Idle_Preen(t, T):
     return d
 
 
-@clip(0.8, loop=True)
+@clip(0.6, loop=True)
 def Walk(t, T):
     d = {}
     p = t / T
@@ -183,11 +220,11 @@ def Walk(t, T):
     d["head"] = (-16 - 15 * empuje, -4 * sin(TAU * p), -2 * cos(TAU * p))
     alas(d, 10 + 6 * cos(2 * TAU * p), 9 + 7 * cos(2 * TAU * p + 0.7))
     d["tail"] = (5 * cos(2 * TAU * p), 0, -15 * sin(TAU * p - 0.5))
-    patas(d, p, 0.078, 0.062)
+    patas_plantadas(d, p, 0.095, 0.062)          # antes 0.078 en 0.8 s (QA 0.9.3: paso más largo)
     return d
 
 
-@clip(14 / FPS, loop=True)
+@clip(12 / FPS, loop=True)
 def Run(t, T):
     d = {}
     p = t / T
@@ -206,7 +243,7 @@ def Run(t, T):
     d["tail"] = (12 + 10 * cos(2 * TAU * p), 0, -8 * sin(TAU * p))
     d["fan"] = 0.55
     d["eye"] = 1.15
-    patas(d, p, 0.105, 0.098, apoyo=0.42)
+    patas_plantadas(d, p, 0.12, 0.098, apoyo=0.42)   # antes 0.105 en 14 fotogramas
     return d
 
 
@@ -881,6 +918,12 @@ def resolver(c, i):
         pivote = Hb["hips"]
         cabeza = d_h + pivote + q_h @ (Hb[leg] - pivote)
         tobillo = Hb[foot] + Vector(c["ankle." + lado][i])
+        if c.get("_nombre") in PLANTADOS:
+            # La base de los dedos pedida está en el mundo; la raíz se mueve (root_l) y se aplasta (vertical s,
+            # horizontal 1/√s): se pasa a la raíz y el tobillo sale de ahí con el giro del pie.
+            r_, b_ = Vector(c["root_l"][i]), Vector(c["base." + lado][i])
+            b_ = Vector(((b_.x - r_.x) * math.sqrt(s), (b_.y - r_.y) * math.sqrt(s), (b_.z - r_.z) / s))
+            tobillo = b_ - q_rig((c["foot_rx." + lado][i], 0, 0)) @ (Hb[toes] - Hb[foot])
         reposo = Hb[foot] - Hb[leg]
         v = tobillo - cabeza
         q_w = reposo.rotation_difference(v)
@@ -908,11 +951,12 @@ def canales(fn, n, loop):
     T = n / FPS
     frames = n + 1
     c = {b: np.zeros((frames, 3)) for b in ROT}
-    for k in ("hips_l", "root_l", "ankle.L", "ankle.R"):
+    for k in ("hips_l", "root_l", "ankle.L", "ankle.R", "base.L", "base.R"):
         c[k] = np.zeros((frames, 3))
     for k in ("foot_rx.L", "foot_rx.R", "toes_rx.L", "toes_rx.R", "fan"):
         c[k] = np.zeros(frames)
     c["scale"], c["eye"] = np.ones(frames), np.ones(frames)
+    c["_nombre"] = fn.__name__
     for i in range(frames):
         t = i / FPS
         d = fn(0.0 if (loop and i == n) else t, T)
@@ -939,7 +983,7 @@ def canales(fn, n, loop):
     # Abrir el abanico: las plumas laterales se separan hacia fuera.
     for hueso, ang in (("tail_high.L", 24), ("tail_high.R", -24), ("tail_low.L", 34), ("tail_low.R", -34)):
         c[hueso][:, 1] += ang * c["fan"]
-    if fn.__name__ not in AEREOS:
+    if fn.__name__ not in AEREOS and fn.__name__ not in PLANTADOS:    # los plantados ya llevan el tobillo bien puesto
         for lado in ("L", "R"):
             a = np.radians(c["foot_rx." + lado])
             d_t = np.radians(c["toes_rx." + lado])

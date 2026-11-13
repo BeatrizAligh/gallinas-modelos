@@ -21,10 +21,14 @@ def cortes(V, E, xs_list, sg):
 
 
 # Revisión a mano, personaje por personaje (vistas de frente y desde arriba en pose T): x de la muñeca, justo donde
-# acaba la manga o el puño y empieza la mano. Lo demás (axila, hombro, codo, pulgar) sale de la malla.
+# acaba la manga o el puño y empieza la mano. Lo demás (axila, hombro, codo, pulgar) sale de la malla; el codo (x) también
+# se puede fijar (por defecto, a media distancia entre hombro y muñeca).
 AJUSTES = {
     'Paco': dict(wrist=0.300),          # manga remangada hasta 0.29, manopla grande
-    'Lola': dict(wrist=0.282),          # puño 0.19-0.235, antebrazo al aire hasta la mano
+    # Lola (malla nueva 0.9.3): manga remangada 0.19-0.234; con el codo a media distancia (0.197) la vuelta de la manga
+    # caía justo en la bisagra y se aplastaba al doblar (Dance, Taunt). Codo al final de la vuelta: dobla la piel.
+    # Arreglos 0.9.3 de rig_granjero_v2.py (bajo el brazo, sisa, capas de ropa, manos fuera del cuerpo): sólo Lola por ahora.
+    'Lola': dict(wrist=0.282, elbow=0.222, bajo_brazo=True, sisa=True, capas=True, sin_choques=True),
     'AbueloTomas': dict(wrist=0.298),   # puño hasta 0.285
     'Rosa': dict(wrist=0.277),          # puño hasta 0.265
     'Chema': dict(wrist=0.282),         # puño hasta 0.265
@@ -129,6 +133,8 @@ def medir_brazo(V, E, sg, armZ, H, log=print, name=None):
     pw = at(wrist_x)
     wrist = np.array([wrist_x, pw[1], pw[2]])
     elbow_x = sh_x + 0.5 * (wrist_x - sh_x)
+    if name in AJUSTES and 'elbow' in AJUSTES[name]:
+        elbow_x = AJUSTES[name]['elbow']
     pe = at(elbow_x)
     elbow = np.array([elbow_x, pe[1], pe[2]])
     r_el = float((pe[3] + pe[4]) / 2)

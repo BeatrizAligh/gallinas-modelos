@@ -127,7 +127,13 @@ print(f'MEDIDAS {NAME}: H={H:.3f} brazos z={armZ:.3f} ({armBot:.3f}-{armTop:.3f}
 
 # ============================================================ 3b. brazos y manos (cortes del tubo del brazo, medidas_brazo.py)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from medidas_brazo import medir_brazo
+from medidas_brazo import medir_brazo, AJUSTES
+# Arreglos de la revisión 0.9.3 (Lola nueva), ACTIVADOS POR PERSONAJE en medidas_brazo.AJUSTES para que relanzar a los
+# demás granjeros dé exactamente lo mismo que antes hasta revisarlos uno por uno: 'bajo_brazo', 'sisa', 'capas',
+# 'sin_choques' (True para activarlo).
+_AJ = AJUSTES.get(NAME, {})
+FIX = {k: bool(_AJ.get(k, False)) for k in ('bajo_brazo', 'sisa', 'capas', 'sin_choques')}
+print('ARREGLOS 0.9.3:', ', '.join(k for k, v in FIX.items() if v) or 'ninguno')
 EDG = np.array([e.vertices[:] for e in body.data.edges])
 _MB = {s_: medir_brazo(V, EDG, sg_, armZ, H, name=NAME) for s_, sg_ in (('L', 1), ('R', -1))}
 
@@ -420,6 +426,7 @@ def keyed(svals, keys):
 
 
 ARM_MASK = np.zeros(len(CO), bool)
+ARM_GROUPS = {'Deltoid', 'UpperArm', 'Elbow', 'LowerArm', 'LowerArmTwist', 'Hand', 'Fingers1', 'Fingers2', 'Thumb1', 'Thumb2'}
 for side, sgn in (('L', 1), ('R', -1)):
     mir = np.array([sgn, 1, 1])
     S_, E_, W_, T_ = ARM['S'] * mir, ARM['E'] * mir, ARM['W'] * mir, ARM['T'] * mir
@@ -445,6 +452,18 @@ for side, sgn in (('L', 1), ('R', -1)):
     f_tube[hand_zone] = 1.0
     f_s = smooth01(-1.6 * bS, -0.5 * bS, spar)
     f = f_tube * f_s
+    # Debajo del brazo en la pose T (costado del torso, bolsillos del chaleco...) no es brazo aunque quede cerca de su eje:
+    # con el radio del tubo (hinchado en la axila) el costado y los bolsillos cogían peso de brazo/deltoides y, al subir el
+    # brazo, se estiraban en picos y rasgaban el chaleco (revisión 0.9.3, Lola nueva). Borde inferior medido del tubo.
+    apit = float(min(_MB['L']['armpit'], _MB['R']['armpit']))
+    pr_ = _prof[_prof[:, 0] >= apit]
+    zb_pr = pr_[:, 2] - pr_[:, 4]
+    zb0 = float(np.median(zb_pr[pr_[:, 0] < apit + 0.04])) if np.any(pr_[:, 0] < apit + 0.04) else float(zb_pr[0])
+    zb = np.interp(np.abs(CO[cand, 0]), pr_[:, 0], zb_pr, left=zb0)
+    zb = np.where(np.abs(CO[cand, 0]) < apit + 0.04, zb0, zb)
+    below = smooth01(0.004, 0.03, zb - CO[cand, 2]) * (spar < 1.4) * ~hand_zone
+    if not FIX['bajo_brazo']: below = np.zeros(len(cand))
+    f = f * (1 - below)
     ARM_MASK[cand[f > 0.3]] = True
     sd = f'.{side}'
     keys = [(-1.0, {'Shoulder' + sd: 1}), (-bS, {'Shoulder' + sd: 1}), (0.0, {'Deltoid' + sd: 1}),
@@ -474,9 +493,16 @@ for side, sgn in (('L', 1), ('R', -1)):
     gidx = {g.index: g.name for g in body.vertex_groups}
     nset = 0
     for k_, i in enumerate(cand):
-        if f[k_] < 0.002: continue
+        if f[k_] < 0.002 and below[k_] < 0.002: continue
         v = body.data.vertices[int(i)]
         old = {gidx[g.group]: g.weight for g in v.groups}
+        if below[k_] > 0.002:                    # bajo el brazo: fuera también el peso de brazo que trajo el proxy
+            # El peso retirado pasa EXPLÍCITAMENTE al tronco (si sólo hubiera grupos de brazo, normalizar lo devolvería).
+            quit_ = sum(w_ * below[k_] for n, w_ in old.items() if n.endswith(sd) and n.split('.')[0] in ARM_GROUPS)
+            old = {n: (w_ * (1 - below[k_]) if n.endswith(sd) and n.split('.')[0] in ARM_GROUPS else w_) for n, w_ in old.items()}
+            if quit_ > 0:
+                tronco = 'Chest' if CO[i, 2] > (s1 + s2) / 2 else 'Spine1'
+                old[tronco] = old.get(tronco, 0.0) + quit_
         tot = sum(old.values()) or 1.0
         new_w = {n: w_ / tot * (1 - f[k_]) for n, w_ in old.items()}
         for j_, n in enumerate(allnames):
@@ -487,6 +513,105 @@ for side, sgn in (('L', 1), ('R', -1)):
         nset += 1
     print(f'PESOS brazo {side}: {nset} vértices por cadena (bandas hombro {bS:.2f}, codo {bEu:.2f}/{bEl:.2f}, muñeca {bW:.2f})')
 
+
+
+# ---- Capas de ropa (revisión 0.9.3, Lola nueva: chaleco encima de la camisa en la misma pieza). La capa de dentro copia
+# los pesos de la de fuera en el punto que tiene justo encima (rayo por su normal): si no, al subir el brazo la camisa,
+# que está más cerca del eje del brazo y recibe más peso de la cadena, atraviesa el chaleco.
+def capas_de_ropa(dist=0.02 * H, banda=0.012):
+    from mathutils.bvhtree import BVHTree
+    from mathutils.interpolate import poly_3d_calc
+    bm_ = bmesh.new(); bm_.from_mesh(body.data)
+    bm_.verts.ensure_lookup_table(); bm_.faces.ensure_lookup_table()
+    bvh_ = BVHTree.FromBMesh(bm_)
+    gname = {g.index: g.name for g in body.vertex_groups}
+    Wd = [{gname[g.group]: g.weight for g in v.groups} for v in body.data.vertices]
+    pares = []
+    for v in bm_.verts:
+        i = v.index
+        if head_only[i] or v.co.z > cut - band: continue
+        n_ = v.normal
+        hit, hn, fi, d_ = bvh_.ray_cast(v.co + n_ * 1e-4, n_, dist)
+        if hit is None or hn.dot(n_) < 0.3: continue
+        ids = [u.index for u in bm_.faces[fi].verts]
+        if i in ids or any(head_only[j] for j in ids): continue
+        pares.append((i, ids, poly_3d_calc([bm_.verts[j].co for j in ids], hit)))
+    for _ in range(3):                                   # capas de 3 (pañuelo sobre chaleco sobre camisa)
+        new = {}
+        for i, ids, bw in pares:
+            acc = {}
+            for j, b_ in zip(ids, bw):
+                for n_, w_ in Wd[j].items(): acc[n_] = acc.get(n_, 0.0) + w_ * b_
+            new[i] = acc
+        for i, acc in new.items(): Wd[i] = acc
+    # Borde: la camisa que asoma justo fuera del chaleco (sisa) se funde con la copiada en `banda` metros.
+    tapados = np.zeros(len(CO), bool)
+    for i, _, _ in pares: tapados[i] = True
+    if tapados.any():
+        kt = kdtree.KDTree(int(tapados.sum()))
+        for i in np.where(tapados)[0]: kt.insert(CO[i], int(i))
+        kt.balance()
+        for v in bm_.verts:
+            i = v.index
+            if tapados[i] or head_only[i] or v.co.z > cut - band: continue
+            co_, j, d_ = kt.find(v.co)
+            if d_ >= banda: continue
+            # sólo si el vecino tapado está en la misma superficie (no salta del chaleco a la camisa de al lado)
+            if v.normal.dot(bm_.verts[j].normal) < 0.5: continue
+            k_ = 0.5 * (1 - d_ / banda)
+            acc = {n_: w_ * (1 - k_) for n_, w_ in Wd[i].items()}
+            for n_, w_ in Wd[j].items(): acc[n_] = acc.get(n_, 0.0) + w_ * k_
+            Wd[i] = acc
+    toc = set(i for i, _, _ in pares)
+    for i, acc in enumerate(Wd):
+        v = body.data.vertices[i]
+        old = {gname[g.group]: g.weight for g in v.groups}
+        if old == acc: continue
+        for g in list(v.groups): body.vertex_groups[g.group].remove([i])
+        tot = sum(acc.values()) or 1.0
+        for n_, w_ in acc.items():
+            if w_ / tot > 0.005: body.vertex_groups[n_].add([i], float(w_ / tot), 'REPLACE')
+    bm_.free()
+    print(f'PESOS capas: {len(toc)} vértices de capas interiores copian los pesos de la capa de encima')
+
+
+# ---- Sisa (revisión 0.9.3): alrededor de la axila, el borde del chaleco y la manga que sale de debajo tenían saltos de
+# peso (deltoides / brazo) en pocos milímetros y, con el brazo muy arriba (NetSwing, Hammer, Throw), el chaleco se rasgaba
+# y la manga se doblaba por encima. Suavizado espacial (por distancia, no por aristas: capas y bordes sueltos reciben lo
+# mismo) sólo en la zona de la sisa.
+def suavizar_sisa(radio=0.028, pasadas=3):
+    if pasadas <= 0: return
+    gname = {g.index: g.name for g in body.vertex_groups}
+    Wd = [{gname[g.group]: g.weight for g in v.groups} for v in body.data.vertices]
+    S_ = ARM['S']; LSE_ = float(np.linalg.norm(ARM['E'] - ARM['S']))
+    zona = (~head_only) & (np.abs(CO[:, 0]) > S_[0] - 0.035) & (np.abs(CO[:, 0]) < S_[0] + 0.5 * LSE_)         & (CO[:, 2] > S_[2] - 0.11) & (CO[:, 2] < S_[2] + 0.08)
+    ids = np.where(zona)[0]
+    kd_ = kdtree.KDTree(len(CO))
+    for i, c in enumerate(CO):
+        if not head_only[i]: kd_.insert(c, i)
+    kd_.balance()
+    vec = {int(i): [(j, math.exp(-(d / (0.5 * radio)) ** 2)) for _, j, d in kd_.find_range(CO[i], radio)
+                    if (CO[j, 0] > 0) == (CO[i, 0] > 0)] for i in ids}
+    for _ in range(pasadas):
+        new = {}
+        for i, nb in vec.items():
+            acc, tw = {}, 0.0
+            for j, w in nb:
+                tw += w
+                for n_, w_ in Wd[j].items(): acc[n_] = acc.get(n_, 0.0) + w_ * w
+            new[i] = {n_: w_ / tw for n_, w_ in acc.items()}
+        for i, a in new.items(): Wd[i] = a
+    for i in ids:
+        v = body.data.vertices[int(i)]
+        for g in list(v.groups): body.vertex_groups[g.group].remove([v.index])
+        tot = sum(Wd[i].values()) or 1.0
+        for n_, w_ in Wd[i].items():
+            if w_ / tot > 0.005: body.vertex_groups[n_].add([v.index], float(w_ / tot), 'REPLACE')
+    print(f'PESOS sisa: {len(ids)} vértices suavizados por distancia ({pasadas} pasadas, radio {radio:.3f})')
+
+
+if FIX['sisa']: suavizar_sisa()
+if FIX['capas']: capas_de_ropa()
 bpy.ops.object.vertex_group_limit_total(limit=4)
 bpy.ops.object.vertex_group_normalize_all(lock_active=False)
 print(f'PESOS v2: transferidos desde el proxy, {missing} rellenados por vecindad')
@@ -788,18 +913,6 @@ def clip(sec, loop=False):
     return deco
 
 
-def walk_legs(p, t, sw, knee_amp, base_knee, lean_foot=0.4):
-    """Ciclo de piernas: talón al apoyar, rodilla que se dobla al pasar, punta que empuja al despegar."""
-    ph = TAU * t
-    kneeL = base_knee + max(0.0, -math.sin(ph)) * knee_amp + max(0.0, math.sin(ph + TAU * 0.25)) * 6
-    kneeR = base_knee + max(0.0, math.sin(ph)) * knee_amp + max(0.0, math.sin(ph + TAU * 0.75)) * 6
-    fL = max(0.0, sw) * lean_foot - max(0.0, -sw) * 0.35
-    fR = max(0.0, -sw) * lean_foot - max(0.0, sw) * 0.35
-    toeL = max(0.0, -math.sin(ph - 0.6)) * 25
-    toeR = max(0.0, math.sin(ph - 0.6)) * 25
-    p.leg('L', sw, kneeL, foot=fL, toe=toeL).leg('R', -sw, kneeR, foot=fR, toe=toeR)
-
-
 # ================================================================ clips de cuerpo entero
 @clip(3.2, True)
 def Idle(t):
@@ -820,34 +933,174 @@ def Idle(t):
     return p
 
 
-@clip(1.0, True)
-def Walk(t):
-    """Paso chibi con rebote: cadera que gira con la pierna, hombros al contrario, brazos con retraso y cabeza estable."""
+# ---------------- locomoción con apoyo PLANTADO (QA 0.9.3: "parece que patinan")
+# Antes Walk/Run eran de péndulo (la pierna oscilaba por ángulos y el pie nunca quedaba quieto en el suelo): con ningún
+# ritmo dejaban de patinar. Ahora cada pie sigue una trayectoria en el espacio del clip (sin avance): en el APOYO la bola
+# del pie (cabeza del hueso Toe, la que mide el juego) va hacia atrás en línea recta a velocidad constante = velocidad de
+# diseño del clip, plana y luego girando sobre la bola (despega el talón); en el BALANCEO vuelve por delante con una curva
+# de Hermite cuya velocidad al principio y al final es la del apoyo (sin tirón al tocar suelo). Piernas por IK de dos
+# huesos (rodilla hacia delante); la cadera baja lo justo para que la pierna llegue (constante por clip) más el rebote.
+# Fase: el pie izquierdo toca suelo en t = 0.25 (cuando el torso de siempre lo tiene delante: sw > 0), el derecho en 0.75.
+_TH = {s_: (J[f'UpperLeg.{s_}'][1] - J[f'UpperLeg.{s_}'][0]).length for s_ in 'LR'}
+_SH = {s_: (J[f'LowerLeg.{s_}'][1] - J[f'LowerLeg.{s_}'][0]).length for s_ in 'LR'}
+_VF = {s_: J[f'Foot.{s_}'][1] - J[f'Foot.{s_}'][0] for s_ in 'LR'}           # tobillo → bola, en reposo
+_VT = {s_: (J[f'Toe.{s_}'][1] - J[f'Toe.{s_}'][0]).normalized() for s_ in 'LR'}
+_BALL = {s_: J[f'Toe.{s_}'][0].copy() for s_ in 'LR'}                           # bola del pie en reposo
+_HIPS_HEAD = J['Hips'][0].copy()
+LOCO = {}           # medidas por clip (para el log)
+
+
+def _hermite(u, p0, p1, m0, m1):
+    u2, u3 = u * u, u * u * u
+    return (2 * u3 - 3 * u2 + 1) * p0 + (u3 - 2 * u2 + u) * m0 + (-2 * u3 + 3 * u2) * p1 + (u3 - u2) * m1
+
+
+def foot_track(ph, P):
+    """Bola del pie en el espacio del clip para la fase ph (0 = toca suelo). Devuelve (adelante, altura, inclinación del pie
+    en grados (+ = punta arriba), flexión de los dedos (+ = dedos arriba respecto al pie))."""
+    ph %= 1.0
+    b, Ls, c = P['beta'], P['Ls'], P['c']
+    if ph < b:                                       # apoyo: hacia atrás a velocidad constante
+        u = ph / b
+        f = c + Ls / 2 - Ls * u
+        k = max(0.0, (u - P['roll']) / (1 - P['roll']))
+        pitch = -P['off'] * k * k                    # el talón se despega girando sobre la bola
+        return f, 0.0, pitch, -pitch
+    u = (ph - b) / (1 - b)                           # balanceo: vuelve por delante
+    m = -Ls / b * (1 - b)                            # misma velocidad que el apoyo (en unidades de u)
+    f = _hermite(u, c - Ls / 2, c + Ls / 2, m, m)
+    up = P['peak']
+    if u < up: h = P['lift'] * math.sin(0.5 * math.pi * u / up)
+    else: h = P['lift'] * math.cos(0.5 * math.pi * (u - up) / (1 - up))
+    pitch = K(u, (0, -P['off']), (0.3, P['swing_pitch'] * 0.6), (0.65, P['swing_pitch']), (1, 0))
+    toe = K(u, (0, P['off']), (0.25, 0), (1, 0))
+    return f, h, pitch, toe
+
+
+def _hip_joint(p, side):
+    return _HIPS_HEAD + p.hips + p.hips_q @ (J[f'UpperLeg.{side}'][0] - _HIPS_HEAD)
+
+
+def _ankle_target(side, ph, P):
+    f, h, pitch, toe = foot_track(ph, P)
+    sgn = 1 if side == 'L' else -1
+    ball = Vector((sgn * abs(_BALL[side].x) * P['narrow'], _BALL[side].y - f, _BALL[side].z + h))
+    return ball - q(PITCH, -pitch) @ _VF[side], ball, pitch, toe
+
+
+def leg_ik(p, side, ankle, pitch, toe):
+    """Pierna por IK: muslo/espinilla hasta el tobillo, rodilla hacia delante (con el giro de la cadera), pie y dedos
+    orientados en el espacio del clip (planos en el suelo, sin girar con la cadera)."""
+    hj = _hip_joint(p, side)
+    a, b_ = _TH[side], _SH[side]
+    d = ankle - hj
+    dist = min(d.length, (a + b_) * 0.999)
+    dn = d.normalized()
+    ca = max(-1.0, min(1.0, (a * a + dist * dist - b_ * b_) / (2 * a * dist)))
+    kd = p.hips_q @ FWD
+    kd = (kd - dn * kd.dot(dn)).normalized()
+    knee = hj + a * (ca * dn + math.sqrt(max(0.0, 1 - ca * ca)) * kd)
+    p.rot[f'UpperLeg.{side}'] = aim(f'UpperLeg.{side}', (knee - hj).normalized())
+    p.rot[f'LowerLeg.{side}'] = aim(f'LowerLeg.{side}', (hj + dn * dist - knee).normalized())
+    p.rot[f'Foot.{side}'] = aim(f'Foot.{side}', (q(PITCH, -pitch) @ _VF[side]).normalized())
+    p.rot[f'Toe.{side}'] = aim(f'Toe.{side}', q(PITCH, -(pitch + toe)) @ _VT[side])
+    return p
+
+
+def plant_legs(p, t, P):
+    """Coloca las dos piernas con el apoyo plantado y fija la altura de cadera: rebote del clip + bajada constante (la
+    mínima para que la pierna llegue a la bola del pie en todo el ciclo, calculada una vez por clip)."""
+    name = P['name']
+    if name not in LOCO:
+        # Centro del apoyo (c) que menos obliga a bajar la cadera, y esa bajada (sólo cuentan los pies apoyados).
+        best = None
+        for c_ in np.linspace(-0.08, 0.06, 29) * _LK:
+            P['c'] = float(c_)
+            nd = _need_drop(P)
+            if best is None or nd < best[1] - 1e-5: best = (float(c_), nd)
+        P['c'] = best[0]
+        LOCO[name] = dict(drop=best[1] + 0.002, v=P['Ls'] / (P['beta'] * P['sec']), c=best[0])
+        print(f'LOCO {name}: paso de apoyo {P["Ls"]:.3f}, apoyo {P["beta"]:.2f} del ciclo, centro {best[0]:+.3f}, '
+              f'velocidad de diseño {LOCO[name]["v"]:.3f} u/s (en el clip), cadera baja {LOCO[name]["drop"]:.3f}')
+    p.hips = Vector((0, 0, P['bob'](t) - LOCO[name]['drop']))
+    for side, o in (('L', -0.25), ('R', 0.25)):
+        ank, ball, pitch, toe = _ankle_target(side, t + o, P)
+        leg_ik(p, side, ank, pitch, toe)
+    return p
+
+
+def _need_drop(P):
+    """Bajada de cadera mínima para que la pierna (al reach de su largo) llegue a la bola del pie en todo el apoyo."""
+    need = 0.0
+    for i in range(60):
+        tt = i / 60
+        pp = P['torso'](tt)
+        pp.hips = Vector((0, 0, P['bob'](tt)))
+        for side, o in (('L', -0.25), ('R', 0.25)):
+            if (tt + o) % 1.0 >= P['beta']: continue          # sólo el apoyo tiene que llegar al suelo
+            ank = _ankle_target(side, tt + o, P)[0]
+            hj = _hip_joint(pp, side)
+            L = (_TH[side] + _SH[side]) * P['reach']
+            dh = math.hypot(ank.x - hj.x, ank.y - hj.y)
+            if dh >= L:
+                need = max(need, hj.z - ank.z)
+                continue
+            need = max(need, hj.z - (ank.z + math.sqrt(L * L - dh * dh)))
+    return need
+
+
+def _walk_torso(t):
     sw = 26 * math.sin(TAU * t)
-    bob = C(2 * (t - 0.1))                          # abajo justo después del apoyo, arriba al pasar
-    p = Pose().torso(hips=(5, sw * 0.3, -S(t, 3)), spine=(2 + bob * 1.2, -sw * 0.25, S(t, 1.5)),
-                     chest=(-1, -sw * 0.35, S(t - 0.05, 1.5)), neck=(0, sw * 0.15, 0), head=(-5 + bob * 1.5, sw * 0.2, -S(t, 2)))
-    walk_legs(p, t, sw, 34, 8)
-    p.hips = Vector((0, 0, -drop_for(8) - bob * 0.014 * H))
+    bob = C(2 * (t - 0.31))
+    return Pose().torso(hips=(5, sw * 0.3, -S(t, 3)), spine=(2 + bob * 1.2, -sw * 0.25, S(t, 1.5)),
+                        chest=(-1, -sw * 0.35, S(t - 0.05, 1.5)), neck=(0, sw * 0.15, 0), head=(-5 + bob * 1.5, sw * 0.2, -S(t, 2)))
+
+
+_LK = LEG / 0.255          # proporción de pierna respecto a la de referencia (Lola: 0.255)
+WALK = dict(name='Walk', sec=0.6, beta=0.56, Ls=0.20 * _LK, c=0.0, roll=0.55, off=28.0, lift=0.045 * _LK,
+            peak=0.45, swing_pitch=8.0, narrow=0.92, reach=0.975, torso=_walk_torso,
+            bob=lambda t: -0.012 * H * C(2 * (t - 0.31)))        # abajo justo tras el apoyo (0.25 / 0.75), arriba al pasar
+
+
+@clip(WALK['sec'], True)
+def Walk(t):
+    """Paso chibi con rebote y el pie de apoyo PLANTADO: cadera que gira con la pierna, hombros al contrario, brazos con
+    retraso y cabeza estable."""
+    p = _walk_torso(t)
+    plant_legs(p, t, WALK)
     lag = 0.07                                       # los brazos siguen al cuerpo con retraso (superposición)
     for side, sgn in (('L', -1), ('R', 1)):
-        a = sgn * 24 * math.sin(TAU * (t - lag))
+        a = sgn * 26 * math.sin(TAU * (t - lag))
         relaxed_arm(p, side, a, 16 + max(0.0, a) * 0.9, curl=0.4)
     return p
 
 
-@clip(0.62, True)
-def Run(t):
-    """Carrera con fase de vuelo: inclinado, brazos bombeando con los codos a 90° y puños cerrados."""
+_RUN_MID = 0.25 + 0.36 / 2          # mitad del apoyo izquierdo
+RUN_OFF = 0.25 - (1 - 2 * 0.36) / 4   # mitad del vuelo que acaba con el apoyo izquierdo
+
+
+def _run_torso(t):
     sw = 42 * math.sin(TAU * t)
-    fl = abs(math.sin(TAU * (t - 0.08)))            # vuelo
-    p = Pose().torso(hips=(14, sw * 0.32, -S(t, 4)), spine=(6 + fl * 2, -sw * 0.3, 0),
-                     chest=(3, -sw * 0.45, S(t - 0.05, 2)), neck=(0, sw * 0.15, 0), head=(-14 - fl * 2, sw * 0.25, 0))
-    walk_legs(p, t, sw, 75, 22, lean_foot=0.2)
-    p.hips = Vector((0, 0, -drop_for(22) + fl * 0.035 * H))
+    fl = 0.5 - 0.5 * C(2 * (t - _RUN_MID))           # 0 a mitad del apoyo, 1 en el vuelo
+    return Pose().torso(hips=(14, sw * 0.32, -S(t, 4)), spine=(6 + fl * 2, -sw * 0.3, 0),
+                        chest=(3, -sw * 0.45, S(t - 0.05, 2)), neck=(0, sw * 0.15, 0), head=(-14 - fl * 2, sw * 0.25, 0))
+
+
+RUN = dict(name='Run', sec=0.5, beta=0.36, Ls=0.26 * _LK, c=0.0, roll=0.4, off=38.0, lift=0.10 * _LK,
+           peak=0.38, swing_pitch=12.0, narrow=0.85, reach=0.985, torso=_run_torso,
+           bob=lambda t: -0.03 * H * C(2 * (t - _RUN_MID)))      # abajo a mitad del apoyo, arriba en el vuelo
+
+
+@clip(RUN['sec'], True)
+def Run(t):
+    """Carrera con fase de vuelo y pie de apoyo PLANTADO: inclinado, brazos bombeando con los codos a 90° y puños cerrados.
+    El clip empieza a mitad de un vuelo (t + RUN_OFF): la costura del bucle no cae con un pie apoyado."""
+    t = (t + RUN_OFF) % 1.0
+    p = _run_torso(t)
+    plant_legs(p, t, RUN)
     lag = 0.05
     for side, sgn in (('L', -1), ('R', 1)):
-        a = sgn * 44 * math.sin(TAU * (t - lag))
+        a = sgn * 46 * math.sin(TAU * (t - lag))
         u = fwd(a + 8) @ D(0, AB * 0.9, -1)
         l = fwd(a + 98) @ D(0, -0.05, -1)
         p.arm(side, u, l, palm=PALM_IN, curl=0.85, wrist=8)
@@ -1187,6 +1440,293 @@ def HoneyCarry(t):
 
 UPPER = ['Carry', 'Throw', 'NetSwing', 'Grab', 'Push', 'Hammer', 'GunDraw', 'GunAim', 'GunFire', 'Pecked', 'HoneyCarry']
 
+# ============================================================ 6c. PRIMERA PERSONA (QA 0.9.3)
+# Clips sólo para el "viewmodel" del dueño en 1ª persona (FarmerBody: un esqueleto copia que sólo enseña antebrazos y
+# manos). Los demás jugadores nunca los ven. Se diseñan DESDE LA CÁMARA: un punto de la pantalla (16:9, 0-1) y una
+# profundidad para el agarre de cada mano, y la orientación de la herramienta respecto a la pose en la que el juego la
+# monta (SceneBuilder: red en Idle, escopeta en GunAim, martillo en el punto más bajo de Hammer, tarro en HoneyCarry).
+# El cuerpo (que no se ve) se desplaza lo que haga falta para que los brazos chibi lleguen: así el antebrazo entra desde
+# abajo/la esquina, lejos de la cámara, y la mano y la herramienta quedan por encima de la barra de botones.
+FP_ALTO = {'Paco': 1.89, 'Lola': 1.78, 'AbueloTomas': 1.76, 'Rosa': 1.67, 'Chema': 1.65}   # = FarmerArt.Models (m)
+FP_S = FP_ALTO.get(NAME, 1.75) / H                       # metros del juego por unidad del modelo
+_HEAD_Z = J['Head'][0].z
+FP_EYE = Vector((0.0, sy - 0.06 / FP_S, _HEAD_Z + (H - _HEAD_Z) * 0.38))   # cámara (SceneBuilder.eyeHeight + SetEyeHeight)
+FP_SOCKET = FP_EYE + (FWD * 0.52 - UP * 0.46) / FP_S     # HandSocket: la gallina en brazos (FarmerController.SetEyeHeight)
+FP_VFOV, FP_ASPECT = 75.0, 16.0 / 9.0                    # CameraRig.baseFov (vertical)
+LEFT = -RIGHT
+
+
+def fp_point(sx, sy_, d):
+    """Punto del modelo que se ve en (sx, sy_) de una pantalla 16:9 a d unidades delante de la cámara (mirando de frente)."""
+    ty = math.tan(math.radians(FP_VFOV / 2)); tx = ty * FP_ASPECT
+    return FP_EYE + FWD * d + RIGHT * ((sx - 0.5) * 2 * tx * d) + UP * ((sy_ - 0.5) * 2 * ty * d)
+
+
+def fp_screen(pt):
+    d = (pt - FP_EYE).dot(FWD)
+    ty = math.tan(math.radians(FP_VFOV / 2)); tx = ty * FP_ASPECT
+    return (0.5 + (pt - FP_EYE).dot(RIGHT) / (2 * tx * d), 0.5 + (pt - FP_EYE).dot(UP) / (2 * ty * d), d)
+
+
+def _posed_of(p):
+    posed_rot.clear()
+    ps = solve(p.rot, p.hips)
+    return ps, dict(posed_rot)
+
+
+def _grip_point(ps, side):
+    return ps[f'Grip.{side}'].translation.copy()
+
+
+# Herramientas en 1ª persona: el juego (FarmerBody) monta la copia de cada herramienta en el agarre (Grip) con estos ejes,
+# en el espacio del personaje: "eje" = mango de la red y del martillo, cañón de la escopeta, arriba del tarro; "otro" =
+# frente del aro, arriba de la escopeta, cabeza del martillo, frente del tarro. En Unity: (v·RIGHT, v·UP, v·FWD).
+# La mano se pone anatómica: el mango pasa por el puño a lo largo del pulgar.
+def _n(v):
+    return v.normalized()
+
+
+_NET_AXIS = _n(UP * 0.75 + FWD * 0.5 + RIGHT * 0.25)      # por el lado derecho: el aro no tapa el centro
+_GUN_AXIS = _n(FWD + LEFT * 0.22 + UP * 0.22)      # algo hacia arriba: la culata baja, fuera del cuadro
+_HAMMER_AXIS = _n(FWD * 0.45 + UP * 0.85 + LEFT * 0.1)
+FP_TOOL = {
+    'FP_Net': {'R': ('Net', _NET_AXIS, FWD)},
+    'FP_Jar': {'R': ('Net', _NET_AXIS, FWD), 'L': ('Jar', UP, FWD)},
+    'FP_Gun': {'R': ('Gun', _GUN_AXIS, UP)},
+    'FP_Hammer': {'R': ('Hammer', _HAMMER_AXIS, LEFT)},
+}
+
+
+def fp_hand(side, fingers, thumb):
+    """Rotación absoluta de la mano: dedos hacia `fingers` y pulgar (eje del puño) hacia `thumb`."""
+    hd = (J[f'Hand.{side}'][1] - J[f'Hand.{side}'][0]).normalized()
+    return frame_rot(hd, HAND[side]['thumb_dir'], fingers.normalized(), thumb.normalized())
+
+
+def _corner(side, up=0.78, fwd=0.5, inward=0.3):
+    """Antebrazo que entra desde la esquina de abajo de su lado: hacia delante, arriba y un poco al centro."""
+    return _n(FWD * fwd + UP * up + (LEFT if side == 'R' else RIGHT) * inward)
+
+
+_LUA = {s_: (J[f'UpperArm.{s_}'][1] - J[f'UpperArm.{s_}'][0]).length for s_ in 'LR'}
+_LFA = {s_: (J[f'LowerArmTwist.{s_}'][1] - J[f'LowerArm.{s_}'][0]).length for s_ in 'LR'}
+FP_INFO = {}
+
+
+def fp_arms(p, want, curl=None, rest_side=None):
+    """want = {lado: (punto del agarre (Grip), dirección del antebrazo, rotación absoluta de la mano)}. Mueve el cuerpo
+    (cadera; en 1ª persona no se ve) y pone los brazos por IK: el agarre llega a su punto y el antebrazo entra con la
+    dirección pedida (el codo queda por debajo del borde de la pantalla). El brazo libre cuelga atrás, fuera del cuadro."""
+    curl = curl or {}
+    T = Vector((0, 0, 0))
+    for it in range(16):
+        p.hips = T.copy()
+        if rest_side: relaxed_arm(p, rest_side, -35, 25, curl=0.35)
+        ps, pr = _posed_of(p)
+        c = p.chest_q
+        ci = c.inverted()
+        adj, n_ = Vector(), 0
+        for side, (G, l, Rh) in want.items():
+            W = G - Rh @ (J[f'Grip.{side}'][0] - J[f'Hand.{side}'][0])
+            E = W - _LFA[side] * l
+            v = E - ps[f'UpperArm.{side}'].translation
+            adj += v.normalized() * (v.length - _LUA[side]); n_ += 1
+            p0 = ARM_REST[side][1]
+            p.arm(side, side_vec(ci @ v.normalized(), side), side_vec(ci @ l, side), palm=side_vec(ci @ (Rh @ p0), side),
+                  curl=curl.get(side, 0.6), wrist=0.0)
+        if n_: T = T + adj / n_ * 0.9
+        T = Vector((max(-0.15, min(0.15, T.x)), max(-0.35, min(0.15, T.y)), max(-0.35, min(0.1, T.z))))
+    p.hips = T
+    if rest_side: relaxed_arm(p, rest_side, -35, 25, curl=0.35)
+    ps, pr = _posed_of(p)
+    for side, (G, l, Rh) in want.items():
+        Dl = Rh @ pr[f'Hand.{side}'].inverted()
+        for b_ in ('Hand', 'Fingers1', 'Fingers2', 'Thumb1', 'Thumb2'):
+            nm = f'{b_}.{side}'
+            if nm in p.rot: p.rot[nm] = Dl @ p.rot[nm]
+    if CUR_CLIP[1] == 0.0:
+        ps, pr = _posed_of(p)
+        FP_INFO[CUR_CLIP[0]] = {s_: (fp_screen(ps[f'Grip.{s_}'].translation), fp_screen(ps[f'LowerArm.{s_}'].translation),
+                                     round(T.length, 3)) for s_ in want}
+    return p
+
+
+def fp_base(t):
+    return upper().torso(spine=(0, 0, 0), chest=(2 + S(t) * 0.8, 0, 0), head=(0, 0, 0))
+
+
+def _sway(t, a=0.006):
+    return Vector((S(t + 0.2, a * 0.5), 0, S(t, a)))     # respiración: las manos suben y bajan un poco
+
+
+def _fist(side, l, axis):
+    """Puño alrededor de un mango: pulgar a lo largo del mango y dedos siguiendo al antebrazo (la parte perpendicular)."""
+    f = l - axis * l.dot(axis)
+    if f.length < 1e-3: f = axis.orthogonal()
+    return fp_hand(side, f, axis)
+
+
+def _net_right(t):
+    l = _corner('R')
+    return fp_point(0.72, 0.22, 0.27) + _sway(t), l, _fist('R', l, _NET_AXIS)
+
+
+@clip(1.6, True)
+def FP_Idle(t):
+    """1ª persona, manos vacías: las dos bajas y adelantadas, puños medio cerrados, sólo antebrazos y manos en cuadro."""
+    p = fp_base(t)
+    want = {}
+    for side, x, inward in (('R', 0.70, LEFT), ('L', 0.30, RIGHT)):
+        l = _corner(side, up=0.5, fwd=0.7)
+        want[side] = (fp_point(x, 0.19, 0.27) + _sway(t + (0.5 if side == 'L' else 0.0)), l, fp_hand(side, l, _n(UP * 0.6 + inward * 0.5)))
+    return fp_arms(p, want, curl={'R': 0.45, 'L': 0.45})
+
+
+@clip(1.6, True)
+def FP_Net(t):
+    """1ª persona con la red: mano derecha abajo a la derecha, el antebrazo entra por la esquina y la red sale hacia delante."""
+    p = fp_base(t)
+    return fp_arms(p, {'R': _net_right(t)}, curl={'R': 0.95}, rest_side='L')
+
+
+@clip(1.6, True)
+def FP_Jar(t):
+    """1ª persona con el tarro de miel en la izquierda (abajo a la izquierda, derecho) y la red en la derecha."""
+    p = fp_base(t)
+    lL = _corner('L', up=0.5, fwd=0.7)
+    want = {'R': _net_right(t), 'L': (fp_point(0.27, 0.30, 0.39) + _sway(t + 0.5), lL, fp_hand('L', lL, _n(UP * 0.3 + RIGHT)))}
+    return fp_arms(p, want, curl={'R': 0.95, 'L': 0.7})
+
+
+@clip(1.6, True)
+def FP_Gun(t):
+    """1ª persona con la escopeta en reposo (sin apuntar): la derecha la lleva por la empuñadura abajo a la derecha, el
+    cañón hacia delante, algo arriba y hacia el centro (la culata baja, fuera del cuadro); la izquierda, suelta y fuera.
+    (Con la izquierda bajo el cañón, su codo y la manga quedaban en medio de la pantalla.)"""
+    p = fp_base(t)
+    lR = _corner('R', up=0.7, fwd=0.6, inward=0.3)
+    G = fp_point(0.66, 0.18, 0.28) + _sway(t, 0.004)
+    RR = fp_hand('R', _n(lR - UP * 0.4), _n(UP * 0.8 + _GUN_AXIS * 0.3))        # empuñadura: puño con el pulgar arriba
+    return fp_arms(p, {'R': (G, lR, RR)}, curl={'R': 0.95}, rest_side='L')
+
+
+@clip(0.5, True)
+def FP_Hammer(t):
+    """1ª persona reparando: martillazos cortos delante a la derecha (sube, golpea con rebote); la cabeza siempre a la vista."""
+    p = fp_base(t)
+    k = K(t, (0, 0.05), (0.4, 1), (0.55, -0.08), (0.65, 0.02), (1, 0.05))      # como Hammer: 1 = arriba, 0 = golpe
+    axis = (q(LEFT, -40 * (k - 0.05)) @ _HAMMER_AXIS).normalized()              # al levantar, el mango se echa atrás
+    l = _corner('R', up=0.95 + 0.1 * k, fwd=0.4, inward=0.35)
+    G = fp_point(0.67, 0.23 + 0.07 * k, 0.27)
+    return fp_arms(p, {'R': (G, l, _fist('R', l, axis))}, curl={'R': 0.95}, rest_side='L')
+
+
+@clip(1.0, True)
+def FP_Carry(t):
+    """1ª persona con una gallina en brazos (va en el HandSocket): las manos a sus lados, por la parte que se ve."""
+    p = fp_base(t)
+    j = S(t * 2, 0.004)
+    want = {}
+    for side, sd, inward in (('R', RIGHT, LEFT), ('L', LEFT, RIGHT)):
+        l = _corner(side, up=0.35, fwd=0.8, inward=0.45)
+        G = FP_SOCKET + sd * (0.15 / FP_S) + UP * (0.14 / FP_S) + Vector((0, 0, j if side == 'R' else -j))
+        want[side] = (G, l, fp_hand(side, l, _n(UP + inward * 0.2)))
+    return fp_arms(p, want, curl={'R': 0.5, 'L': 0.5})
+
+
+FP_CLIPS = ['FP_Idle', 'FP_Net', 'FP_Jar', 'FP_Gun', 'FP_Hammer', 'FP_Carry']
+
+# ============================================================ 6b. manos fuera del cuerpo (revisión 0.9.3)
+# Las poses son direcciones pensadas para todos los granjeros; un torso más ancho (el chaleco de Lola) se tragaba las manos
+# (Run: el puño que sube por delante; Taunt/Dance: manos en la cadera). Perfil del torso de ESTE personaje en reposo (sin
+# brazos ni cabeza): por cada altura, una superelipse (|x|/rx)^3 + (|y-cy|/ry)^3 = 1. En cada fotograma, si la mano o el
+# antebrazo quedan dentro (en el marco del pecho), se gira el brazo entero sobre el hombro hacia fuera lo justo.
+_tm = (~ARM_MASK) & (~head_only) & (CO[:, 2] < cut - band)
+_zs = np.arange(crotch, neckZ, 0.02)
+TORSO = []
+for z0_ in _zs:
+    m_ = _tm & (CO[:, 2] >= z0_ - 0.01) & (CO[:, 2] < z0_ + 0.01)
+    if m_.sum() < 8: continue
+    P_ = CO[m_]
+    TORSO.append((float(z0_), float(np.abs(P_[:, 0]).max()), float((P_[:, 1].min() + P_[:, 1].max()) / 2),
+                  float((P_[:, 1].max() - P_[:, 1].min()) / 2)))
+TORSO = np.array(TORSO).reshape(-1, 4)
+# Puntos de control (hueso, extremo, margen = medio grosor de la mano/antebrazo alrededor del eje del hueso)
+_hp = _prof[(_prof[:, 0] > ARM['W'][0] + 0.01) & (_prof[:, 0] < ARM['T'][0] - 0.03)]
+_HR = 0.75 * float(np.median(_hp[:, 4])) if len(_hp) else float('nan')
+if not (math.isfinite(_HR) and _HR > 0): _HR = 0.6 * float(ARM['r_wr'])      # mano corta: radio de la muñeca
+CTRL = [('LowerArmTwist', 0, 0.8 * ARM['r_wr']), ('Hand', 0, _HR), ('Fingers1', 0, _HR), ('Fingers2', 1, 0.8 * _HR),
+        ('Thumb2', 1, 0.6 * _HR)]
+CHAIN = ['UpperArm', 'Elbow', 'LowerArm', 'LowerArmTwist', 'Hand', 'Fingers1', 'Fingers2', 'Thumb1', 'Thumb2']
+# Manos que van sobre la herramienta con la otra (la izquierda en el cañón de la escopeta): no se tocan.
+# Clips con agarre a dos manos de la escopeta (la derecha la empuña en Grip.R y la izquierda sujeta el cañón): no se toca
+# NINGUNA mano, o se rompería la relación entre las dos y el arma. (La gallina de Carry va en el HandSocket del
+# controlador, no en las manos, y el tarro de HoneyCarry en Grip.L con una sola mano: ahí sí se corrige.)
+NO_TOCAR = {(c_, s_) for c_ in ('GunAim', 'GunFire', 'GunDraw') for s_ in 'LR'}
+# GunDraw: mientras la derecha va a por el arma (t < 0.4) la izquierda aún cuelga lejos del cañón: ahí sí se corrige.
+LIBRE_HASTA = {'GunDraw': 0.4}
+USAR_CHOQUES = FIX['sin_choques'] and len(TORSO) >= 3
+if FIX['sin_choques'] and not USAR_CHOQUES: print('TORSO: perfil insuficiente, sin corrección de manos')
+CHOQUES = {}
+if len(TORSO): print(f'TORSO: perfil en {len(TORSO)} alturas ({TORSO[0, 0]:.2f}-{TORSO[-1, 0]:.2f}), margen mano {_HR:.3f}')
+
+
+def _dentro(pr):
+    """Penetración (0 = fuera) de un punto en reposo del torso; devuelve (prof, dirección hacia fuera en reposo)."""
+    x_, y_, z_ = pr
+    if z_ < TORSO[0, 0] - 0.01 or z_ > TORSO[-1, 0] + 0.01: return 0.0, None
+    rx = float(np.interp(z_, TORSO[:, 0], TORSO[:, 1])); cy = float(np.interp(z_, TORSO[:, 0], TORSO[:, 2]))
+    ry = float(np.interp(z_, TORSO[:, 0], TORSO[:, 3]))
+    return rx, cy, ry
+
+
+def sin_choques(p, posed):
+    for side in 'LR':
+        if f'Hand.{side}' not in p.rot: continue
+        if (CUR_CLIP[0], side) in NO_TOCAR and CUR_CLIP[1] >= LIBRE_HASTA.get(CUR_CLIP[0], -1.0): continue
+        total = 0.0
+        for it in range(20):
+            M = posed['Spine1'] @ REST['Spine1'].inverted()          # movimiento del tronco (reposo → pose)
+            Mi = M.inverted()
+            worst, push = 0.0, None
+            for bn, end, mg in CTRL:
+                nm = f'{bn}.{side}'
+                if nm not in posed: continue
+                pt_rest = J[nm][end]
+                pw = posed[nm] @ (REST[nm].inverted() @ pt_rest)
+                pr = Mi @ pw
+                r_ = _dentro(pr)
+                if r_[1] is None: continue
+                rx, cy, ry = r_
+                ax, ay = rx + mg, ry + mg
+                u_ = (abs(pr.x) / ax) ** 3 + (abs(pr.y - cy) / ay) ** 3
+                if u_ >= 1.0: continue
+                dep = (1 - u_ ** (1 / 3)) * min(ax, ay)
+                if dep > worst:
+                    # Hacia fuera: normal de la superelipse en ese punto
+                    nx = (abs(pr.x) / ax) ** 2 / ax * (1 if pr.x >= 0 else -1)
+                    ny = (abs(pr.y - cy) / ay) ** 2 / ay * (1 if pr.y >= cy else -1)
+                    worst, push = dep, (pw, (M.to_3x3() @ Vector((nx, ny, 0))).normalized())
+            if worst < 0.002 or push is None: break
+            sh = posed[f'UpperArm.{side}'].translation
+            pw, dw = push
+            ax_ = (pw - sh).cross(dw)
+            if ax_.length < 1e-6: break
+            ang = min(4.0, max(1.0, math.degrees(worst / max(0.05, (pw - sh).length))))
+            R_ = Quaternion(ax_.normalized(), math.radians(ang))
+            for bn in CHAIN:
+                nm = f'{bn}.{side}'
+                if nm in p.rot: p.rot[nm] = R_ @ p.rot[nm]
+            if f'Deltoid.{side}' in p.rot: p.rot[f'Deltoid.{side}'] = qslerp(Quaternion(), R_, 0.5) @ p.rot[f'Deltoid.{side}']
+            total += ang
+            posed_rot.clear()
+            posed = solve(p.rot, p.hips)
+        if total > 0:
+            st = CHOQUES.setdefault(CUR_CLIP[0], [set(), 0.0])
+            st[0].add(round(CUR_CLIP[1], 4)); st[1] = max(st[1], total)
+    return p
+
+
 # ============================================================ 7. hornear acciones
 arm_obj.animation_data_create()
 for b in pb: b.rotation_mode = 'QUATERNION'
@@ -1202,15 +1742,36 @@ for name, (sec, loop, fn) in CLIPS.items():
         CUR_CLIP[1] = t
         p = fn(t)
         posed_rot.clear()
-        solve(p.rot, p.hips)
+        posed = solve(p.rot, p.hips)
+        if USAR_CHOQUES and not name.startswith('FP_'):      # 1ª persona: el cuerpo no se ve, sólo antebrazos
+            p = sin_choques(p, posed)
+            posed_rot.clear()
+            solve(p.rot, p.hips)
         for b in pb:
             b.keyframe_insert('rotation_quaternion', frame=f, group=b.name)
             if b.name == 'Hips': b.keyframe_insert('location', frame=f, group=b.name)
     act.use_fake_user = True
+    if name in ('Walk', 'Run'):
+        # Bucle: tangentes cíclicas (sin el modificador, las claves de los extremos quedan planas y el pie apoyado se
+        # frena en la costura del bucle).
+        fcs = list(getattr(act, 'fcurves', []) or []) or [fc for ly in act.layers for st_ in ly.strips for cb in st_.channelbags for fc in cb.fcurves]
+        for fc in fcs:
+            for kp in fc.keyframe_points:                # tangentes suaves sin recorte (como las "smooth" de Unity):
+                kp.handle_left_type = kp.handle_right_type = 'AUTO'     # el recorte en extremos hace dientes
+            fc.modifiers.new('CYCLES')
+            fc.update()
     actions.append(act)
     st = TWIST_STATS.get(name, [0, 0, 0])
     print(f'CLIP {name}: {n} fotogramas{" (bucle)" if loop else ""}  giro antebrazo máx {st[0]:.0f}°, giro brazo {st[1]:.0f}°, codo {st[2]:.0f}°'
-          f'{"  ¡CODO AL REVÉS " + str(sorted(WARN[name])) + "!" if name in WARN else ""}')
+          f'{"  ¡CODO AL REVÉS " + str(sorted(WARN[name])) + "!" if name in WARN else ""}'
+          f'{"  manos fuera del cuerpo en %d fotogramas (máx %.0f°)" % (len(CHOQUES[name][0]), CHOQUES[name][1]) if name in CHOQUES else ""}')
+
+for k_, v_ in FP_INFO.items():
+    print(f'FP {k_}: ' + ' | '.join(f'{s_}: agarre en pantalla ({a_[0]:.2f}, {a_[1]:.2f}) a {a_[2] * FP_S:.2f} m, codo en ({e_[0]:.2f}, {e_[1]:.2f}); cuerpo movido {d_ * FP_S:.2f} m'
+                                    for s_, (a_, e_, d_) in v_.items()))
+for k_, v_ in FP_TOOL.items():
+    for s_, (tool_, ax_, ot_) in v_.items():
+        print(f'FP_TOOL {k_} {s_} {tool_}: eje Unity ({ax_.dot(RIGHT):.3f}, {ax_.dot(UP):.3f}, {ax_.dot(FWD):.3f}) otro ({ot_.dot(RIGHT):.3f}, {ot_.dot(UP):.3f}, {ot_.dot(FWD):.3f})')
 
 # Pistas NLA silenciadas (para revisar en Blender); el FBX exporta cada acción como una toma (use_all_actions).
 arm_obj.animation_data.action = None
