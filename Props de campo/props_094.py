@@ -20,6 +20,8 @@ Clips (30 fps):
   espantapajaros   Idle_Viento (5 s, bucle)  Sacudida (1,2 s: picotazo)   (también el roto, más caído)
   tractor          Motor (1 s, bucle: vibración del chasis). Ruedas = pivotes rígidos que gira el juego.
   carretilla, nido estáticos (sólo LODs).
+  finales (0.9.5)  abrevadero, candado, escaleras, nidos, remolque, silo: LODs. Pozo (cubo) y Gallinero (farol): Idle 4/3 s.
+  arboles (0.9.5)  Idle_Viento (6 s, bucle). Raiz fija -> Tronco (se dobla en el tronco, que es estrecho) -> Copa.
 """
 import bpy, bmesh, sys, os, math, glob
 import numpy as np
@@ -29,7 +31,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
 SOLO = next((set(a.split("=", 1)[1].split(",")) for a in argv if a.startswith("solo=")), None)
 VISTAS = next((a.split("=", 1)[1] for a in argv if a.startswith("vistas=")), None)
-GRUPOS = [a for a in argv if "=" not in a and a not in ("sinparar", "diag")] or ["arbustos", "maizales", "maizdanado", "espantapajaros", "tractor", "carretilla", "nido"]
+GRUPOS = [a for a in argv if "=" not in a and a not in ("sinparar", "diag")] or ["arbustos", "maizales", "maizdanado", "espantapajaros", "tractor", "carretilla", "nido", "arboles", "finales"]
 FPS = 30
 TOPE_P999, TOPE_MAX = 0.06, 0.15   # estiramiento de aristas permitido (6 % casi todas, 15 % la peor)
 RESUMEN = []
@@ -680,6 +682,80 @@ def g_tractor():
         bpy.data.objects.remove(junto)
 
 
+# ------------------------------------------------------------------ árboles (0.9.5)
+
+def perfil(co, bins=60):
+    """Anchura (máximo de X e Y, percentiles 1-99) por franja de altura normalizada, relativa a la mayor."""
+    H = co[:, 2].max()
+    t = co[:, 2] / H
+    an = np.zeros(bins)
+    for b in range(bins):
+        m = (t >= b / bins) & (t < (b + 1) / bins)
+        if m.sum() > 5:
+            an[b] = max(np.percentile(co[m, 0], 99) - np.percentile(co[m, 0], 1), np.percentile(co[m, 1], 99) - np.percentile(co[m, 1], 1))
+    return an / max(an.max(), 1e-6)
+
+
+def arbol(nombre, fbx, png, salida):
+    """Árbol: el tronco es estrecho, así que TODO el doblez va en el tronco (franja de pesos desde el suelo hasta donde
+    empieza la copa); la copa se mueve casi rígida encima (girar sólido no estira nada) y sólo un poco más arriba
+    (banda ancha, ángulo pequeño). La base queda fija en el suelo."""
+    nueva_escena()
+    src = importar(fbx, png, nombre)
+    co = coords(src)
+    H = float(co[:, 2].max())
+    an = perfil(co)
+    bins = len(an)
+    # Todos llevan una base de tierra con piedras y hierba (ancha, ~12 % de abajo): queda FIJA. El tronco empieza donde
+    # la anchura cae (franja estrecha o sin vértices: el tronco es un cilindro largo) y la copa donde vuelve a abrirse.
+    b0 = next((b for b in range(3, bins // 2) if an[b] < 0.35), int(bins * 0.12))
+    b1 = next((b for b in range(b0 + 2, bins) if an[b] > 0.6), int(bins * 0.4))
+    t0 = b0 / bins
+    tc = float(np.clip(b1 / bins, t0 + 0.06, 0.7))
+    print("PERFIL", nombre, " ".join(f"{x:.2f}" for x in an), f"base hasta {t0:.2f}, copa desde {tc:.2f}")
+    arm = esqueleto(nombre, [("Raiz", None, (0, 0, 0), (0, 0, t0 * H)),
+                             ("Tronco", "Raiz", (0, 0, t0 * H), (0, 0, tc * H)),
+                             ("Copa", "Tronco", (0, 0, tc * H), (0, 0, H * 1.02))])
+
+    def campos(o):
+        t = coords(o)[:, 2] / H
+        s1 = smooth(t0 - 0.01, tc + 0.04, t)
+        s2 = smooth(tc - 0.05, 1.2, t)
+        return {"Raiz": 1 - s1, "Tronco": np.clip(s1 - s2, 0, 1), "Copa": s2}
+
+    lods = []
+    for i, obj in enumerate([12000, 5000, 1800]):
+        o = lod(src, f"{nombre}_LOD{i}", obj)
+        pesar(o, arm, campos(o))
+        lods.append(o)
+    src.hide_render = True
+    src.hide_set(True)
+
+    def viento(t, T):
+        return {"Tronco": (ondas(0.9, 0.0, T, t), 0, ondas(0.6, 1.2, T, t)),
+                "Copa": (ondas(1.2, -0.8, T / 2, t, 0.25), 0, ondas(1.0, 0.5, T, t))}
+    acts = [clip(arm, "Idle_Viento", 6.0, viento)]
+    revisar(nombre, lods[0], arm, acts)
+    RESUMEN.append(f"{nombre}: base hasta {t0:.2f}, copa desde {tc:.2f}, alto {H:.3f} (sin escala), ancho {tuple(round(float(x), 3) for x in (co.max(0) - co.min(0))[:2])}, "
+                   f"tris original {tris(src)}, LODs {[tris(o) for o in lods]}")
+    arm.animation_data.action = acts[0]
+    exportar([arm] + lods, salida)
+    vista(nombre, lods)
+    vista(nombre, [lods[0]], arm, acts[0], frame=int(acts[0].frame_range[1] * 0.25), extra="_pose")
+    if VISTAS:
+        pinta_pesos(nombre, lods[0])
+
+
+def g_arboles():
+    for f in sorted(glob.glob(P("Arboles", "Árboles", "*.fbx"))):
+        n = "".join(c for c in os.path.basename(f) if c.isdigit())
+        if SOLO and n not in SOLO: continue
+        png = P("Arboles", "Textura", f"ÁRBOL {n}.png")
+        if not os.path.exists(png):
+            print("SIN TEXTURA, fuera:", f); continue
+        arbol(f"Arbol{n}", f, png, P("Arboles", "Animados", f"Arbol{n}_anim.fbx"))
+
+
 # ------------------------------------------------------------------ estáticos
 
 def estatico(nombre, fbx, png, salida, objetivos):
@@ -699,6 +775,94 @@ def g_carretilla():
 
 def g_nido():
     estatico("Nido", P("Nido", "Nido_final.fbx"), P("Nido", "Nido_color.png"), P("Nido", "Animados", "Nido_LOD.fbx"), [5000, 2000, 800])
+
+
+# 0.9.5: props finales de Karol (cada uno en su carpeta <Nombre>/<Nombre>.fbx|png). Salida <Nombre>/Animados/<Nombre>_LOD.fbx
+FINALES = {"Abrevadero": [6000, 2400, 900], "Candado": [3000, 1200, 500], "Escaleras_plataforma": [6000, 2400, 900],
+           "Gallinero": [9000, 4000, 1900], "Nidos": [6000, 2400, 900], "Pozo": [8000, 3800, 2000],
+           "Remolque": [8000, 3000, 1100], "Silo": [8000, 3200, 1700]}
+
+
+# Piezas colgantes con Idle (bucle): (hueso, caja min, caja max, pivote, amplitud en grados, periodo s). La pieza son las islas
+# de la malla que caben enteras en la caja (cubo + cuerda del pozo, farol del gallinero); se mueven rígidas alrededor del
+# pivote (donde cuelgan), el resto queda fijo en "Raiz". Al ser islas sueltas no hay aristas que se estiren.
+COLGANTES = {
+    "Pozo": [("Cubo", (-0.175, -0.125, 0.18), (0.035, 0.095, 0.43), (-0.07, -0.013, 0.427), 3.0, 4.0)],
+    "Gallinero": [("Farol", (0.16, -0.26, 0.31), (0.27, -0.155, 0.445), (0.212, -0.21, 0.442), 4.0, 3.0)],
+}
+
+
+def islas(o):
+    bm = bmesh.new(); bm.from_mesh(o.data); bm.verts.ensure_lookup_table()
+    lab = -np.ones(len(bm.verts), int); k = 0
+    for v in bm.verts:
+        if lab[v.index] >= 0:
+            continue
+        st = [v]
+        while st:
+            x = st.pop()
+            if lab[x.index] >= 0:
+                continue
+            lab[x.index] = k
+            st += [e.other_vert(x) for e in x.link_edges]
+        k += 1
+    bm.free()
+    return lab
+
+
+def colgante(nombre, fbx, png, salida, objetivos, piezas):
+    nueva_escena()
+    src = importar(fbx, png, nombre)
+    huesos = [("Raiz", None, (0, 0, 0), (0, 0, 0.1))] + [(h, "Raiz", piv, (piv[0], piv[1], piv[2] + 0.05)) for h, _, _, piv, _, _ in piezas]
+    arm = esqueleto(nombre, huesos)
+    lods = []
+    for i, obj in enumerate(objetivos):
+        o = lod(src, f"{nombre}_LOD{i}", obj)
+        co = coords(o); lab = islas(o)
+        campos = {"Raiz": np.ones(len(co))}
+        for h, lo, hi, _, _, _ in piezas:
+            dentro = np.all((co >= np.array(lo) - 1e-4) & (co <= np.array(hi) + 1e-4), axis=1)
+            w = np.zeros(len(co))
+            for k in np.unique(lab[dentro]):
+                if dentro[lab == k].all():
+                    w[lab == k] = 1.0
+            campos["Raiz"] = campos["Raiz"] - w
+            campos[h] = w
+            RESUMEN.append(f"{nombre}_LOD{i}/{h}: {int(w.sum())} vértices se mueven ({w.mean() * 100:.1f} %)")
+            assert w.sum() > 20, f"{nombre}_LOD{i}: la pieza {h} se quedó sin vértices"
+        campos["Raiz"] = np.clip(campos["Raiz"], 0, 1)
+        pesar(o, arm, campos)
+        lods.append(o)
+    src.hide_set(True); src.hide_render = True
+
+    def idle(t, T):
+        pose = {}
+        for j, (h, _, _, _, amp, per) in enumerate(piezas):
+            w = 2 * math.pi / T
+            # balanceo suave (adelante-atrás y un poco de lado), número entero de ciclos en el bucle
+            pose[h] = (amp * math.sin(w * t + j), 0.0, amp * 0.45 * math.sin(2 * w * t + 0.7 + j))
+        return pose
+    T = piezas[0][5]
+    act = clip(arm, "Idle", T, idle)
+    revisar(nombre, lods[0], arm, [act])
+    RESUMEN.append(f"{nombre}: tamaño {tuple(round(x, 3) for x in src.dimensions)}, tris {tris(src)} -> {[tris(o) for o in lods]}, Idle {T} s")
+    exportar([arm] + lods, salida)
+    vista(nombre, lods)
+    vista(nombre, lods[:1], arm, act, frame=round(T * FPS / 4) + 1, extra="_idle")
+
+
+def g_finales():
+    for n, obj in FINALES.items():
+        if SOLO and n not in SOLO:
+            continue
+        if n in COLGANTES:
+            colgante(n, P(n, n + ".fbx"), P(n, n + ".png"), P(n, "Animados", n + "_anim.fbx"), obj, COLGANTES[n])
+            vieja = P(n, "Animados", n + "_LOD.fbx")
+            for f in (vieja, vieja[:-4] + ".blend"):
+                if os.path.exists(f):
+                    os.remove(f)
+        else:
+            estatico(n, P(n, n + ".fbx"), P(n, n + ".png"), P(n, "Animados", n + "_LOD.fbx"), obj)
 
 
 for g in GRUPOS:
