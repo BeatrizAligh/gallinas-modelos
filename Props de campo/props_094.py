@@ -31,7 +31,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
 SOLO = next((set(a.split("=", 1)[1].split(",")) for a in argv if a.startswith("solo=")), None)
 VISTAS = next((a.split("=", 1)[1] for a in argv if a.startswith("vistas=")), None)
-GRUPOS = [a for a in argv if "=" not in a and a not in ("sinparar", "diag")] or ["arbustos", "maizales", "maizdanado", "espantapajaros", "tractor", "carretilla", "nido", "arboles", "finales"]
+GRUPOS = [a for a in argv if "=" not in a and a not in ("sinparar", "diag")] or ["arbustos", "maizales", "maizdanado", "espantapajaros", "tractor", "carretilla", "nido", "arboles", "finales", "nuevos"]
 FPS = 30
 TOPE_P999, TOPE_MAX = 0.06, 0.15   # estiramiento de aristas permitido (6 % casi todas, 15 % la peor)
 RESUMEN = []
@@ -433,7 +433,7 @@ def g_maizales():
 def g_maizdanado():
     for f in sorted(glob.glob(P("Maiz dañado", "Finales", "*.fbx"))):
         n = "".join(c for c in os.path.basename(f) if c.isdigit())
-        png = glob.glob(P("Maiz dañado", "Texturas", f"Maiz_{n}*.png"))
+        png = glob.glob(P("Maiz dañado", "Texturas", f"Maiz_{n}*.png")) or glob.glob(P("Maiz dañado", "Texturas", f"color_MaizDa*_{n}.png"))
         if not png:
             print("SIN TEXTURA, fuera:", f); continue
         planta(f"MaizRoto{n}", f, png[0], P("Maiz dañado", "Animados", f"MaizRoto{n}_anim.fbx"), [0.12, 0.4, 0.7], [(0.12, 0.7), (0.35, 1.0), (0.6, 1.3)],
@@ -487,12 +487,49 @@ def marcas_espantapajaros(co):
     return dict(H=H, W=W, cintura=cintura, brazos=(b_lo / bins, (b_hi + 1) / bins), cuello=cuello, ala=(ala, 0.05), perfil=ancho)
 
 
+def tumbar_roto(src, mk):
+    """El modelo roto trae el cuerpo flotando encima del palo partido. Lo tumba en el suelo: boca arriba, caído hacia
+    atrás (+Y) desde el tocón, un poco girado, con su punto más bajo en el suelo. El tocón y la base no se mueven."""
+    H = mk["H"]
+    zc = mk["cintura"][0] * H
+    me = src.data
+    co = coords(src)
+    arriba = co[:, 2] > zc
+    base = co[~arriba]
+    cuerpo = co[arriba]
+    zb = cuerpo[:, 2].min()
+    yp = (cuerpo[:, 1].min() + cuerpo[:, 1].max()) / 2
+    xp = (cuerpo[:, 0].min() + cuerpo[:, 0].max()) / 2
+    # Boca arriba: (y, z) relativos al pie del cuerpo -> (z, -y): la cara (−Y) queda mirando al cielo.
+    rel = cuerpo - np.array([xp, yp, zb])
+    t = np.stack([rel[:, 0], rel[:, 2], -rel[:, 1]], 1)
+    # Un poco girado y ladeado para que parezca caído de verdad, no colocado.
+    a, r = math.radians(24), math.radians(8)
+    ry = t[:, 1] * math.cos(r) - t[:, 2] * math.sin(r)   # ladeo sobre su eje largo
+    rz = t[:, 1] * math.sin(r) + t[:, 2] * math.cos(r)
+    t = np.stack([t[:, 0], ry, rz], 1)
+    x2 = t[:, 0] * math.cos(a) - t[:, 1] * math.sin(a)
+    y2 = t[:, 0] * math.sin(a) + t[:, 1] * math.cos(a)
+    t = np.stack([x2, y2, t[:, 2]], 1)
+    # Los pies del cuerpo justo al borde de la base del tocón (encima de la hierba un poco), apoyado en el suelo.
+    borde = base[:, 1].max()
+    t[:, 1] += borde - 0.06 - t[:, 1].min()
+    t[:, 0] += base[:, 0].mean() - (t[:, 0].min() + t[:, 0].max()) / 2 + 0.05
+    t[:, 2] += -t[:, 2].min() - 0.008
+    co[arriba] = t
+    me.vertices.foreach_set("co", co.reshape(-1))
+    me.update()
+    print(f"ROTO tumbado: {arriba.sum()} vértices del cuerpo, corte z={zc:.3f}, caja {co.min(0).round(3)} {co.max(0).round(3)}")
+
+
 def espantapajaros(nombre, fbx, png, salida, roto=False):
     nueva_escena()
     src = importar(fbx, png, nombre)
     co = coords(src)
     mk = marcas_espantapajaros(co)
     H, W = mk["H"], mk["W"]
+    if roto:
+        tumbar_roto(src, mk)
     print("PERFIL", " ".join(f"{x:.2f}" for x in mk["perfil"]))
     txt = (f"cintura {mk['cintura'][0]:.2f}±{mk['cintura'][1]:.2f} ({mk['cintura'][2]}) brazos {mk['brazos'][0]:.2f}-"
            f"{mk['brazos'][1]:.2f} cuello {mk['cuello'][0]:.2f} ala {mk['ala'][0]:.2f}")
@@ -528,6 +565,9 @@ def espantapajaros(nombre, fbx, png, salida, roto=False):
         resto2 = resto - w_s - w_c
         w_b = cuerpo * resto2
         w_r = resto2 - w_b
+        if roto:  # tumbado en el suelo: quieto del todo (los huesos de pie no le sirven)
+            cero = np.zeros(len(c))
+            return {"Raiz": np.ones(len(c)), "Cuerpo": cero, "Cabeza": cero, "Sombrero": cero, "Mano.L": cero, "Mano.R": cero}
         return {"Raiz": w_r, "Cuerpo": w_b, "Cabeza": w_c, "Sombrero": w_s, "Mano.L": w_ml, "Mano.R": w_mr}
 
     lods = []
@@ -863,6 +903,104 @@ def g_finales():
                     os.remove(f)
         else:
             estatico(n, P(n, n + ".fbx"), P(n, n + ".png"), P(n, "Animados", n + "_LOD.fbx"), obj)
+
+
+# ------------------------------------------------------------------ 0.9.7: modelos nuevos del equipo
+
+def estatico_centrado(nombre, fbx, png, salida, objetivos):
+    """Como estatico() pero con el origen en el CENTRO de la caja (piezas que giran: aspas del molino)."""
+    nueva_escena()
+    src = importar(fbx, png, nombre)
+    co = coords(src)
+    src.data.transform(Matrix.Translation((0, 0, -(co[:, 2].min() + co[:, 2].max()) / 2)))
+    lods = [lod(src, f"{nombre}_LOD{i}", obj) for i, obj in enumerate(objetivos)]
+    src.hide_set(True); src.hide_render = True
+    RESUMEN.append(f"{nombre} (centrado): tamaño {tuple(round(x, 3) for x in src.dimensions)}, tris {tris(src)} -> {[tris(o) for o in lods]}")
+    exportar(lods, salida, anim=False)
+    vista(nombre, lods)
+
+
+def separar_pieza(nombre, pieza, fbx, png, caja_min, caja_max, pivote, salida_fija, salida_pieza, obj_fija, obj_pieza):
+    """Separa las islas que caben enteras en la caja (coordenadas del FBX original) en una pieza aparte con el origen en
+    el pivote (para que el juego la balancee); el resto queda como modelo fijo. Ambas en el mismo marco que importar()."""
+    nueva_escena()
+    co0 = None
+    bpy.ops.import_scene.fbx(filepath=fbx)
+    tmp = [o for o in bpy.context.scene.objects if o.type == "MESH"][0]
+    tmp.data.transform(tmp.matrix_world)
+    co0 = np.array([v.co[:] for v in tmp.data.vertices])
+    lo0, hi0 = co0.min(0), co0.max(0)
+    shift = np.array([-(lo0[0] + hi0[0]) / 2, -(lo0[1] + hi0[1]) / 2, -lo0[2]])
+    for o in list(bpy.context.scene.objects):
+        bpy.data.objects.remove(o)
+    src = importar(fbx, png, nombre)
+    bmn = np.array(caja_min) + shift; bmx = np.array(caja_max) + shift; piv = np.array(pivote) + shift
+    co = coords(src)
+    en = set()
+    lab = islas(src)
+    for k in range(int(lab.max()) + 1):
+        ids = np.where(lab == k)[0]
+        c = co[ids]
+        if (c.min(0) >= bmn).all() and (c.max(0) <= bmx).all():
+            en.update(int(i) for i in ids)
+    print(f"SEPARAR {nombre}: {len(en)} vértices en la pieza")
+
+    def copia(nm, quitar_en):
+        o = src.copy(); o.data = src.data.copy(); o.name = o.data.name = nm
+        bpy.context.scene.collection.objects.link(o)
+        bm = bmesh.new(); bm.from_mesh(o.data); bm.verts.ensure_lookup_table()
+        fuera = [v for v in bm.verts if (v.index in en) == quitar_en]
+        bmesh.ops.delete(bm, geom=fuera, context="VERTS")
+        bm.to_mesh(o.data); bm.free()
+        return o
+    fija = copia(nombre + "_src", True)
+    pz = copia(pieza + "_src", False)
+    pz.data.transform(Matrix.Translation((-piv[0], -piv[1], -piv[2])))
+    src.hide_set(True); src.hide_render = True
+    for o, nm, objs, out in ((fija, nombre, obj_fija, salida_fija), (pz, pieza, obj_pieza, salida_pieza)):
+        lods = [lod(o, f"{nm}_LOD{i}", ob) for i, ob in enumerate(objs)]
+        o.hide_set(True); o.hide_render = True
+        RESUMEN.append(f"{nm}: tamaño {tuple(round(x, 3) for x in o.dimensions)}, tris {tris(o)} -> {[tris(x) for x in lods]}")
+        exportar(lods, out, anim=False)
+        for x in lods: x.hide_set(True); x.hide_render = True
+    RESUMEN.append(f"{pieza}: pivote en el marco del juego {tuple(round(float(v), 4) for v in piv)}")
+
+
+CARTELES = {  # clave: (fbx, png)
+    "CartelAbeja": ("CARTEL ABEJA.fbx", "color_cartel_abeja.png"),
+    "CartelCasa": ("CARTEL CASA.fbx", "color_cartel_Casa.png"),
+    "CartelHongo": ("CARTEL HONGO.fbx", "Color_cartel_hongo.png"),
+    "CartelPaloma": ("CARTEL PALOMA flag pole 3d model.fbx", "Color_cartel_paloma.png"),
+    "CartelCuerda": ("cartel_cuerda.fbx", "color_cartel_cuerda.png"),
+    "CartelFlechas": ("cartel_flechas.fbx", "color_cartel_flechas.png"),
+    "CartelHoja": ("cartel_Hoja.fbx", "Color_cartel_Hoja.png"),
+    "CartelPapeles": ("cartel_Papeles.fbx", "Color_cartel_papeles.png"),
+    "CartelTablon": ("cartel_tablon.fbx", "color_cartel_madera.png"),
+}
+
+
+def g_nuevos():
+    def quiere(n): return not SOLO or n in SOLO
+    if quiere("Molino"):
+        estatico("Molino", P("Molino", "Final Molino.fbx"), P("Molino", "color_molino_color.png"), P("Molino", "Animados", "Molino_LOD.fbx"), [9000, 3500, 1400])
+    if quiere("MolinoAspas"):
+        estatico_centrado("MolinoAspas", P("Molino", "Final astas molino.fbx"), P("Molino", "color_aspas.png"), P("Molino", "Animados", "MolinoAspas_LOD.fbx"), [3000, 1400, 600])
+    if quiere("Campana"):
+        # La campanita (cuerpo, badajo y gancho) cuelga del brazo: x > -0.16, z > 0.38 en el FBX original; cuelga del gancho.
+        separar_pieza("Campana", "CampanaBadajo", P("Campana", "Final campana.fbx"), P("Campana", "color_Campana_color.png"),
+                      (-0.16, -1.2, 0.38), (0.0, -1.0, 0.66), (-0.105, -1.1, 0.647),
+                      P("Campana", "Animados", "Campana_LOD.fbx"), P("Campana", "Animados", "CampanaBadajo_LOD.fbx"), [5000, 2000, 800], [1500, 700, 300])
+    if quiere("ColmenaAzul"):
+        estatico("ColmenaAzul", P("Colmena", "Colmenas", "Final Colmena azul.fbx"), P("Colmena", "Colmenas", "color_2 colmena.png"), P("Colmena", "Animados", "ColmenaAzul_LOD.fbx"), [4000, 1800, 700])
+    if quiere("ColmenaRoja"):
+        estatico("ColmenaRoja", P("Colmena", "Colmenas", "FinalColmenaRoja.fbx"), P("Colmena", "Colmenas", "color_colmenaRoja.png"), P("Colmena", "Animados", "ColmenaRoja_LOD.fbx"), [4000, 1800, 700])
+    for n in range(1, 7):
+        if quiere(f"MaizSuelo{n}"):
+            estatico(f"MaizSuelo{n}", P("Maiz de gallinas", "Maiz Gallinas", f"{n}_Maiz.fbx"), P("Maiz de gallinas", "Maiz Gallinas", f"color_{n}_Maiz Gallinas.png"),
+                     P("Maiz de gallinas", "Animados", f"MaizSuelo{n}_LOD.fbx"), [1500, 700, 300])
+    for k, (f, png) in CARTELES.items():
+        if quiere(k):
+            estatico(k, P("Carteles", "Carteles", f), P("Carteles", "Carteles", png), P("Carteles", "Animados", f"{k}_LOD.fbx"), [5000, 2000, 800])
 
 
 for g in GRUPOS:
